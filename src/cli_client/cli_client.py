@@ -11,9 +11,17 @@ logger = logging.getLogger("manual_generator")
 SERVER_URL = "http://127.0.0.1:8000/orchestrate"
 
 def clean_json_string(raw_string):
-    """Cleans potential Markdown artifacts from LLM response."""
-    # Removes ```json ... ``` blocks
-    cleaned = re.sub(r"```json\s?|```", "", raw_string).strip()
+    """Cleans Markdown artifacts and ensures only the first JSON object is parsed."""
+    # 1. Remove markdown code block markers with any language tag
+    cleaned = re.sub(r"```[a-z]*\s?|```", "", raw_string).strip()
+    
+    # 2. If there is still extra text after the closing brace, 
+    # isolate just the first JSON object found.
+    start_idx = cleaned.find('{')
+    end_idx = cleaned.rfind('}')
+    if start_idx != -1 and end_idx != -1:
+        return cleaned[start_idx:end_idx + 1]
+    
     return cleaned
 
 def execute_tool(json_payload):
@@ -38,43 +46,61 @@ def mock_agent_loop(llm_output):
     print("✅ Success!")
     print(result)
 
-# Example usage
-if __name__ == "__main__":
-    # Simulated LLM output
-    llm_json_list = """
+def generate_list_command():
+    return """
     ```json
     {
         "command": "list"
     }
     ```
     """
-    llm_json_activate = """
+
+def generate_activate_command(server_name):
+    return f"""
     ```json
-    {
+    {{
         "command": "activate",
-        "server_name": "weather"
-    }
+        "server_name": "{server_name}"
+    }}
     ```
     """
-    llm_json_execute = """
+
+def generate_execute_command(server_name, language, code):
+    return f"""
     ```json
-    {
+    {{
         "command": "execute",
-        "server_name": "weather",
-        "language": "python",
-        "code": "import asyncio; print('Hello from the AI Agent!'); from weather import get_forecast, get_alerts; print(asyncio.run(get_forecast(34.0522, -118.2437))); print('#'*30); print(asyncio.run(get_alerts('MA')))"
-    }
+        "server_name": "{server_name}",
+        "language": "{language}",
+        "code": "{code}"
+    }}
     ```
     """
-    llm_json_stop = """
+
+def generate_stop_command(server_name):
+    return f"""
     ```json
-    {
+    {{
         "command": "stop",
-        "server_name": "weather"
-    }
+        "server_name": "{server_name}"
+    }}
     ```
     """
-    mock_agent_loop(llm_json_list)
-    mock_agent_loop(llm_json_activate)
-    mock_agent_loop(llm_json_execute)
-    mock_agent_loop(llm_json_stop)
+
+# Example usage
+if __name__ == "__main__":
+    # Simulated LLM output
+    commands = [
+        generate_list_command(),
+        generate_activate_command("weather"),
+        generate_activate_command("weather"),
+        generate_execute_command("weather", "python", "print('Hello from the AI Agent!')"),
+        generate_execute_command("weather", "python", "import asyncio; print(asyncio.run(get_forecast(34.0522, -118.2437)))"),
+        generate_execute_command("weather", "python", "import asyncio; print(asyncio.run(get_alerts('MA')))"),
+        generate_stop_command("weather"),
+        generate_stop_command("weather")
+    ]
+    
+    for command in commands:
+        mock_agent_loop(command)
+

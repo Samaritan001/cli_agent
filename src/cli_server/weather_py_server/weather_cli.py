@@ -10,10 +10,11 @@ import re
 
 import sys
 from pathlib import Path
-root_path = Path(__file__).resolve().parent.parent.parent
-sys.path.append(str(root_path))
+import asyncio
 
-from assets.request_headers import CodeRequest
+class CodeRequest(BaseModel):
+    language: str
+    code: str
 
 app = FastAPI()
 
@@ -22,7 +23,7 @@ async def execute_code(request: CodeRequest, response: Response):
     # Mapping languages to execution commands
     # Add more as needed (e.g., 'javascript': ['node', '-e'])
     commands = {
-        "python": ["uv", "run", "python3", "-c"],
+        "python": ["python3", "-c"],
         "bash": ["bash", "-c"]
     }
 
@@ -35,25 +36,34 @@ async def execute_code(request: CodeRequest, response: Response):
 
     try:
         imports = "from weather import get_forecast, get_alerts\n"
+        full_code = imports + request.code
         script_dir = Path(__file__).resolve().parent
-        result = subprocess.run(
-            commands[request.language] + [imports + request.code],
-            capture_output=True,
-            text=True,
-            timeout=5,
+
+        process = await asyncio.create_subprocess_exec(
+            *commands[request.language.lower()],
+            full_code,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             cwd=script_dir
         )
 
-        if result.returncode != 0:
-            logging.error(f"Execution error:\n{result.stderr}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Execution error: {result.stderr.strip()}")
+        try:
+            # Wait for completion with a timeout
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10.0)
+        except asyncio.TimeoutError:
+            process.kill()
+            raise HTTPException(status_code=status.HTTP_408_REQUEST_TIMEOUT, detail="Execution timed out.")
+
+        if process.returncode != 0:
+            error_msg = stderr.decode().strip()
+            logging.error(f"Execution error:\n{error_msg}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Execution error: {error_msg}")
         
         response.status_code = status.HTTP_200_OK
         return {
-            "stdout": result.stdout
+            "stdout": stdout.decode()
         }
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=status.HTTP_408_REQUEST_TIMEOUT, detail="Execution timed out.")
+    
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal Error: {str(e)}")
 
@@ -84,4 +94,4 @@ def validate_code_integrity(language: str, code: str):
 if __name__ == "__main__":
     import uvicorn
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
