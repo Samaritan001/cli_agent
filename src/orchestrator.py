@@ -11,6 +11,7 @@ import os
 import asyncio
 from pathlib import Path
 
+import json
 import socket
 import docker
 import httpx
@@ -52,17 +53,21 @@ class AIOrchestrator:
         # asyncio.run(self.activate_server("weather"))
         # asyncio.run(self.stop_server("weather"))
 
-    def list_servers(self) -> Dict[str, str]:
+    async def list_servers(self) -> Dict[str, str]:
         summary = {name: info["summary"] for name, info in self.registry.items()}
-        return str(summary)
+        return {
+            "status": status.HTTP_200_OK,
+            "result": json.dumps(summary),
+            "info": "Fetched Tool Summaries"
+        }
 
-    async def activate_server(self, name: str) -> str:
+    async def activate_server(self, name: str, fetch_manual: bool) -> str:
         if name not in self.registry:
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail=f"Server {name} not found in registry.")
+            return {"status": status.HTTP_404_NOT_FOUND, "detail": f"Server {name} not found in registry."}
         
         async with self.locks[name]:
             if name in self.active_servers:
-                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Server {name} is already active.")
+                return {"status": status.HTTP_422_UNPROCESSABLE_ENTITY, "detail": f"Server {name} is already active."}
         
         port = self.next_port
         image_tag = f"{name}-server:test"
@@ -82,9 +87,9 @@ class AIOrchestrator:
             
         except Exception as e:
             logging.error(f"Docker Error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to start Docker container: {str(e)}")
+            return {"status": status.HTTP_500_INTERNAL_SERVER_ERROR, "detail": f"Failed to start Docker container: {str(e)}"}
         
-        logging.info(f"Activated server: {name} on port {port}")
+        logging.info(f"Activated server: {name} - {port}")
 
         # Wait for the API inside the container to become reachable
         if await self._wait_for_server(port):
@@ -97,18 +102,29 @@ class AIOrchestrator:
             }
             self.next_port += 1 # Ensure the next instance gets a new port
             
-            # Return the manual/docs for the specific server
-            current_dir = Path.cwd()
-            manual_path = current_dir / f"cli_server/docs/{name}.md"
-            manual = ""
-            with open(manual_path, "r") as f:
-                for _ in range(3):
-                    next(f, None)
-                manual = f.read()
-            return manual
+            if fetch_manual:
+                # Return the manual/docs for the specific server
+                current_dir = Path.cwd()
+                manual_path = current_dir / f"cli_server/docs/{name}.md"
+                manual = ""
+                with open(manual_path, "r") as f:
+                    for _ in range(3):
+                        next(f, None)
+                    manual = f.read()
+                return {
+                    "status": status.HTTP_200_OK,
+                    "result": manual,
+                    "info": f"Activated Server: {name} - {port}"
+                }
+            else:
+                return {
+                    "status": status.HTTP_200_OK,
+                    "result": None,
+                    "info": f"Activated Server: {name} - {port}"
+                }
         else:
             container.stop()
-            raise HTTPException(status_code=500, detail="Server failed to start.")
+            return {"status": status.HTTP_500_INTERNAL_SERVER_ERROR, "detail": "Server failed to start."}
     
     async def _wait_for_server(self, port: int, timeout: int = 20) -> bool:
         """Polls the port to see if the FastAPI server is ready via HTTP."""
@@ -128,12 +144,12 @@ class AIOrchestrator:
     
     async def stop_server(self, name: str):
         if name not in self.registry:
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail=f"Server {name} not found in registry.")
+            return {"status": status.HTTP_404_NOT_FOUND, "detail": f"Server {name} not found in registry."}
         
         # 1. Mark as stopping while holding the lock briefly
         async with self.locks[name]:
             if name not in self.active_servers:
-                raise HTTPException(status_code=404, detail=f"Server {name} already stopped or not active.")
+                return {"status": status.HTTP_404_NOT_FOUND, "detail": f"Server {name} already stopped or not active."}
             self.active_servers[name]["status"] = "stopping"
 
         # 2. WAIT WITHOUT HOLDING THE LOCK
@@ -151,20 +167,24 @@ class AIOrchestrator:
                 container.stop()
                 self.active_servers.pop(name)
                 logging.info(f"Stopped server: {name} on port {port}")
-                return f"Server {name} stopped"
+                return {
+                    "status": status.HTTP_200_OK,
+                    "result": None,
+                    "info": f"Stopped Server: {name} - {port}"
+                }
             else:
-                raise HTTPException(status_code=404, detail=f"Server {name} already stopped or not active.")
+                return {"status": status.HTTP_404_NOT_FOUND, "detail": f"Server {name} already stopped or not active."}
         
 
     async def execute(self, name: str, language: str, code: str):
         if name not in self.registry:
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail=f"Server {name} not found in registry.")
+            return {"status": status.HTTP_404_NOT_FOUND, "detail": f"Server {name} not found in registry."}
         
         async with self.locks[name]:
             if name not in self.active_servers:
-                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Server {name} not activated")
+                return {"status": status.HTTP_422_UNPROCESSABLE_ENTITY, "detail": f"Server {name} not activated"}
             elif self.active_servers[name]["status"] == "stopping":
-                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Server {name} is stopping and cannot accept new requests.")
+                return {"status": status.HTTP_503_SERVICE_UNAVAILABLE, "detail": f"Server {name} is stopping and cannot accept new requests."}
             self.active_servers[name]["counter"] += 1
         
         server_url = f"http://127.0.0.1:{self.active_servers[name]['port']}/execute"
@@ -179,8 +199,12 @@ class AIOrchestrator:
                 # Added a timeout to prevent the orchestrator from hanging
                 response = await client.post(server_url, json=data, timeout=10.0)
                 if response.status_code != status.HTTP_200_OK:
-                    raise HTTPException(status_code=response.status_code, detail=response.json().get('detail'))
-                return response.json()['stdout']
+                    return {"status": response.status_code, "detail": response.json().get('detail')}
+                return {
+                    "status": status.HTTP_200_OK,
+                    "result": response.json()['stdout'].strip(),
+                    "info": f"Executed Server: {name} - {self.active_servers[name]['port']}"
+                }
         finally:
             async with self.locks[name]:
                 self.active_servers[name]["counter"] -= 1
@@ -191,18 +215,21 @@ app = FastAPI()
 orchestrator = AIOrchestrator()  # Initialize once
 
 @app.post("/orchestrate")
-async def handle_request(req: CommandRequest, response: Response) -> str:
+async def handle_request(req: CommandRequest, response: Response) -> dict:
     if req.command == "list":
-        return orchestrator.list_servers()
+        result = await orchestrator.list_servers()
     
     elif req.command == "activate":
-        return await orchestrator.activate_server(req.server_name)
+        result = await orchestrator.activate_server(req.server_name, req.fetch_manual)
     
     elif req.command == "stop":
-        return await orchestrator.stop_server(req.server_name)
+        result = await orchestrator.stop_server(req.server_name)
     
     elif req.command == "execute":
-        return await orchestrator.execute(req.server_name, req.language, req.code)
+        result = await orchestrator.execute(req.server_name, req.language, req.code)
+    
+    result["id"] = req.id
+    return result
     
 
 if __name__ == "__main__":

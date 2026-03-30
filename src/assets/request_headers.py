@@ -8,7 +8,8 @@ class CodeRequest(BaseModel):
 
 class CommandRequest(BaseModel):
     command: str
+    id: int
+    fetch_manual: Optional[bool] = True
     server_name: Optional[str] = None
-    server_summary: Optional[str] = None
     language: Optional[str] = None
     code: Optional[str] = None
