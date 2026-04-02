@@ -1,0 +1,46 @@
+[
+    {
+        "function_declarations": [
+            {
+                "name": "list",
+                "description": "Get summaries of all available servers.",
+                "parameters": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "activate",
+                "description": "Activate a server and load its manual.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server_name": { "type": "string" }
+                    },
+                    "required": ["server_name"]
+                }
+            },
+            {
+                "name": "execute",
+                "description": "Execute code on an active server.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server_name": { "type": "string" },
+                        "language": { "type": "string" },
+                        "code": { "type": "string" }
+                    },
+                    "required": ["server_name", "language", "code"]
+                }
+            },
+            {
+                "name": "stop",
+                "description": "Deactivate a server.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server_name": { "type": "string" }
+                    },
+                    "required": ["server_name"]
+                }
+            }
+        ]
+    }
+]

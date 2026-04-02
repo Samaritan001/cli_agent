@@ -1,7 +1,7 @@
 import inspect
 from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel
-from typing import Optional, Dict, Set
+from typing import Optional, Dict, Set, Any
 from collections import defaultdict
 
 import logging
@@ -20,7 +20,7 @@ from assets.request_headers import CommandRequest
 
 LOG_FORMAT = "\033[32m%(levelname)s\033[0m:    %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-logger = logging.getLogger("manual_generator")
+logger = logging.getLogger("orchestrator")
 
 # --- 1. The Encapsulated Logic ---
 class AIOrchestrator:
@@ -28,15 +28,16 @@ class AIOrchestrator:
         self.docker_client = docker.from_env()
         self.registry: Dict[str, Dict[str, str]] = {} # {servername: {summary: server_summary, etc.}}
         self.active_servers: Dict[str, Dict[str, int | Any]] = {} # {servername: {port, container, status, counter}}
-        self.locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.locks: Dict[str, asyncio.Lock] = {}
         self.next_port = 8001 # need turn-around logic
 
         # initialize the registry
         current_dir = Path.cwd()
         docs_path = current_dir / "cli_server/docs"
+        # docs_path = current_dir / ".." / "cli_server/docs"
         for filename in os.listdir(docs_path):
             file_path = os.path.join(docs_path, filename)
-            logging.info(f"--- Checking file: {file_path} ---")
+            logger.info(f"--- Checking file: {file_path} ---")
             
             # Ensure we are only reading files (skipping subdirectories)
             try:
@@ -45,9 +46,9 @@ class AIOrchestrator:
                         "summary": f.readline().strip(),
                         "cli": f.readline().strip()
                     }})
-                    logging.info(f"Server summary and cli path read from {filename}")
+                    logger.info(f"Server summary and cli path read from {filename}")
             except Exception as e:
-                logging.error(f"Could not read {filename}: {e}")
+                logger.error(f"Could not read {filename}: {e}")
         
         # self.list_servers()
         # asyncio.run(self.activate_server("weather"))
@@ -65,6 +66,9 @@ class AIOrchestrator:
         if name not in self.registry:
             return {"status": status.HTTP_404_NOT_FOUND, "detail": f"Server {name} not found in registry."}
         
+        if name not in self.locks:
+            self.locks[name] = asyncio.Lock()
+        
         async with self.locks[name]:
             if name in self.active_servers:
                 return {"status": status.HTTP_422_UNPROCESSABLE_ENTITY, "detail": f"Server {name} is already active."}
@@ -76,20 +80,23 @@ class AIOrchestrator:
         try:
             # Run the container
             # We map the internal port 8000 (from weather_cli.py) to our dynamic host port
-            logging.info(f"Starting container: {container_name} on host port {port}...")
+            logger.info(f"Starting container: {container_name} on host port {port}...")
             container = self.docker_client.containers.run(
                 image_tag,
                 detach=True,
                 name=container_name,
                 ports={'8000/tcp': port}, # {Internal: External}
-                remove=True # Automatically remove container when stopped
+                remove=True, # Automatically remove container when stopped
+                mem_limit="512m",
+                cpu_quota=50000,
+                network_mode="bridge" # use none if no networking is needed
             )
             
         except Exception as e:
-            logging.error(f"Docker Error: {e}")
+            logger.error(f"Docker Error: {e}")
             return {"status": status.HTTP_500_INTERNAL_SERVER_ERROR, "detail": f"Failed to start Docker container: {str(e)}"}
         
-        logging.info(f"Activated server: {name} - {port}")
+        logger.info(f"Activated server: {name} - {port}")
 
         # Wait for the API inside the container to become reachable
         if await self._wait_for_server(port):
@@ -108,7 +115,7 @@ class AIOrchestrator:
                 manual_path = current_dir / f"cli_server/docs/{name}.md"
                 manual = ""
                 with open(manual_path, "r") as f:
-                    for _ in range(3):
+                    for _ in range(2): # TODO: change this magical number
                         next(f, None)
                     manual = f.read()
                 return {
@@ -166,7 +173,7 @@ class AIOrchestrator:
                 container = self.active_servers[name]["container"]
                 container.stop()
                 self.active_servers.pop(name)
-                logging.info(f"Stopped server: {name} on port {port}")
+                logger.info(f"Stopped server: {name} on port {port}")
                 return {
                     "status": status.HTTP_200_OK,
                     "result": None,
@@ -216,6 +223,7 @@ orchestrator = AIOrchestrator()  # Initialize once
 
 @app.post("/orchestrate")
 async def handle_request(req: CommandRequest, response: Response) -> dict:
+    print(f"Received request: {req}")
     if req.command == "list":
         result = await orchestrator.list_servers()
     

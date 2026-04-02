@@ -89,7 +89,7 @@ Forecast: {period["detailedForecast"]}
 # def main():
 #     result = asyncio.run(get_forecast(34.0522, -118.2437))
 #     print(result[:200])
-#     logging.info("Example forecast retrieval complete.")
+#     logger.info("Example forecast retrieval complete.")
 
 # if __name__ == "__main__":
 #     main()
