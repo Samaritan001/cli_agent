@@ -33,7 +33,9 @@ class LanguageModel:
         self.history = []
         
         self.model_type = model_type.lower()
-        if self.model_type == "claude":
+        if self.model_type == "gpt":
+            self.model_type = "openai"
+        elif self.model_type == "claude":
             self.model_type = "anthropic"
         elif self.model_type == "gemini":
             self.model_type = "google"
@@ -49,7 +51,7 @@ class LanguageModel:
         # TODO: Need to verify model names and matching with model types
         if self.model_type == "openai":
             self.client = OpenAI(api_key=self.api_key)
-            self.model_name = model_name if model_name else "gpt-5"
+            self.model_name = model_name if model_name else "gpt-5.4-nano"
         elif self.model_type == "anthropic":
             self.client = Anthropic(api_key=self.api_key)
             self.model_name = model_name if model_name else "claude-4-6-opus"
@@ -60,7 +62,8 @@ class LanguageModel:
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
         
-        with open("tool_definitions.json", "r") as f:
+        tool_definition_path = f"tool_definitions_{self.model_type}.json"
+        with open(tool_definition_path, "r") as f:
             self.tool_definitions = json.load(f)
         with open("system_instruction.md", "r") as f:
             self.system_instruction = f.read()
@@ -128,9 +131,11 @@ class LanguageModel:
 
         if self.model_type == "openai":
             messages = self.to_openai(tool_info)
+            # logger.info(f"System instruction:\n{messages[0]['content']}\n")
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
+                tools=self.tool_definitions,
                 max_completion_tokens=max_tokens
             )
             self.history.append(response.choices[0].message.to_dict()) # Record in history
@@ -433,7 +438,7 @@ You have several commands to interact with servers with tools: "list", "activate
                         {
                             "id": "mock_tool_call_id_1",
                             "function": {
-                                "name": "list",
+                                "name": "list_available_servers",
                                 "arguments": ""
                             }
                         }
@@ -447,7 +452,7 @@ You have several commands to interact with servers with tools: "list", "activate
                         {
                             "id": "mock_tool_call_id_2",
                             "function": {
-                                "name": "activate",
+                                "name": "activate_server",
                                 "arguments": {"server_name": "weather"}
                             }
                         }
@@ -461,7 +466,7 @@ You have several commands to interact with servers with tools: "list", "activate
                         {
                             "id": "mock_tool_call_id_31",
                             "function": {
-                                "name": "execute",
+                                "name": "execute_server_code",
                                 "arguments": {
                                     "server_name": "weather",
                                     "language": "python",
@@ -472,7 +477,7 @@ You have several commands to interact with servers with tools: "list", "activate
                         {
                             "id": "mock_tool_call_id_32",
                             "function": {
-                                "name": "execute",
+                                "name": "execute_server_code",
                                 "arguments": {
                                     "server_name": "weather",
                                     "language": "python",
@@ -490,7 +495,7 @@ You have several commands to interact with servers with tools: "list", "activate
                         {
                             "id": "mock_tool_call_id_4",
                             "function": {
-                                "name": "stop",
+                                "name": "stop_server",
                                 "arguments": {"server_name": "weather"}
                             }
                         }
@@ -513,7 +518,7 @@ You have several commands to interact with servers with tools: "list", "activate
                         {
                             "type": "tool_use",
                             "id": "mock_tool_call_id_1",
-                            "name": "list",
+                            "name": "list_available_servers",
                             "input": {}
                         }
                     ]
@@ -526,7 +531,7 @@ You have several commands to interact with servers with tools: "list", "activate
                         {
                             "type": "tool_use",
                             "id": "mock_tool_call_id_2",
-                            "name": "activate",
+                            "name": "activate_server",
                             "input": {"server_name": "weather"}
                         }
                     ]
@@ -539,7 +544,7 @@ You have several commands to interact with servers with tools: "list", "activate
                         {
                             "type": "tool_use",
                             "id": "mock_tool_call_id_31",
-                            "name": "execute",
+                            "name": "execute_server_code",
                             "input": {
                                 "server_name": "weather",
                                 "language": "python",
@@ -549,7 +554,7 @@ You have several commands to interact with servers with tools: "list", "activate
                         {
                             "type": "tool_use",
                             "id": "mock_tool_call_id_32",
-                            "name": "execute",
+                            "name": "execute_server_code",
                             "input": {
                                 "server_name": "weather",
                                 "language": "python",
@@ -566,7 +571,7 @@ You have several commands to interact with servers with tools: "list", "activate
                         {
                             "type": "tool_use",
                             "id": "mock_tool_call_id_4",
-                            "name": "stop",
+                            "name": "stop_server",
                             "input": {"server_name": "weather"}
                         }
                     ]
@@ -588,7 +593,7 @@ You have several commands to interact with servers with tools: "list", "activate
                             "role": "model",
                             "parts": [
                                 {"text": "This is a mock response with command 'list'."},
-                                {"function_call": {"name": "list", "args": {}}}
+                                {"function_call": {"name": "list_available_servers", "args": {}}}
                             ]
                         }
                     }]
@@ -600,7 +605,7 @@ You have several commands to interact with servers with tools: "list", "activate
                             "role": "model",
                             "parts": [
                                 {"text": "This is a mock response with command 'activate'."},
-                                {"function_call": {"name": "activate", "args": {"server_name": "weather"}}}
+                                {"function_call": {"name": "activate_server", "args": {"server_name": "weather"}}}
                             ]
                         }
                     }]
@@ -614,7 +619,7 @@ You have several commands to interact with servers with tools: "list", "activate
                                 {"text": "This is a mock response with command 'execute'."},
                                 {
                                     "function_call": {
-                                        "name": "execute", 
+                                        "name": "execute_server_code", 
                                         "args": {
                                             "server_name": "weather",
                                             "language": "python",
@@ -624,7 +629,7 @@ You have several commands to interact with servers with tools: "list", "activate
                                 },
                                 {
                                     "function_call": {
-                                        "name": "execute", 
+                                        "name": "execute_server_code", 
                                         "args": {
                                             "server_name": "weather",
                                             "language": "python",
@@ -643,7 +648,7 @@ You have several commands to interact with servers with tools: "list", "activate
                             "role": "model",
                             "parts": [
                                 {"text": "This is a mock response with command 'stop'."},
-                                {"function_call": {"name": "stop", "args": {"server_name": "weather"}}}
+                                {"function_call": {"name": "stop_server", "args": {"server_name": "weather"}}}
                             ]
                         }
                     }]

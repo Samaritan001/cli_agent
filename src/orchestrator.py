@@ -224,16 +224,16 @@ orchestrator = AIOrchestrator()  # Initialize once
 @app.post("/orchestrate")
 async def handle_request(req: CommandRequest, response: Response) -> dict:
     print(f"Received request: {req}")
-    if req.command == "list":
+    if req.command == "list_available_servers":
         result = await orchestrator.list_servers()
     
-    elif req.command == "activate":
+    elif req.command == "activate_server":
         result = await orchestrator.activate_server(req.server_name, req.fetch_manual)
     
-    elif req.command == "stop":
+    elif req.command == "stop_server":
         result = await orchestrator.stop_server(req.server_name)
     
-    elif req.command == "execute":
+    elif req.command == "execute_server_code":
         result = await orchestrator.execute(req.server_name, req.language, req.code)
     
     result["id"] = req.id

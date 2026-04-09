@@ -1,0 +1,75 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "list_available_servers",
+      "description": "Get summaries of all available servers.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "activate_server",
+      "description": "Activate a server and load its manual.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "server_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "execute_server_code",
+      "description": "Execute code on an active server.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "server_name": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "language",
+          "code"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "stop_server",
+      "description": "Deactivate a server.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "server_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name"
+        ]
+      }
+    }
+  }
+]

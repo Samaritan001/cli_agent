@@ -87,11 +87,9 @@ class CLIClient:
             self.language_model.add_user_message(user_input)
 
             print(f"\n--- Agent Response ---")
+            llm_output = self.language_model.parse_response(self.language_model.generate_response(self.tool_manager.get_tool_info()))
             if self.test_flag:
-                llm_output = self.language_model.parse_response(self.language_model.generate_response(self.tool_manager.get_tool_info()))
                 print(f"LLM Output (with tool calls):\n{llm_output}\n")
-            else:
-                llm_output = self.language_model.parse_response(self.language_model.generate_response(self.tool_manager.get_tool_info()))
             content = llm_output.get("content", "")
             if content != "":
                 print(f"{content}\n")
@@ -99,6 +97,8 @@ class CLIClient:
             while len(tool_calls) > 0:
                 await self.tool_callings(tool_calls)
                 llm_output = self.language_model.parse_response(self.language_model.generate_response(self.tool_manager.get_tool_info()))
+                if self.test_flag:
+                    print(f"LLM Output (with tool calls):\n{llm_output}\n")
                 content = llm_output.get("content", "")
                 if content != "":
                     print(f"{content}\n")
@@ -144,19 +144,21 @@ class CLIClient:
                 logger.error(f"❌ Error in tool call id {id}: {error_status} - {detail}\n")
             else:
                 # tool calling results
-                if command == "list":
+                if command == "list_available_servers":
                     self.tool_manager.register_summary(json.loads(call_resp["result"]))
                     result = "Tool summaries have been registered."
-                if command == "activate":
+                if command == "activate_server":
                     if call_resp["result"]:
                         self.tool_manager.register_tool(server_name, call_resp["result"])
                     self.tool_manager.inject_tool(server_name)
                     result = f"Tool '{server_name}' has been activated."
-                elif command == "stop":
+                elif command == "stop_server":
                     self.tool_manager.prune_tool(server_name)
                     result = f"Tool '{server_name}' has been stopped."
-                elif command == "execute":
+                elif command == "execute_server_code":
                     result = call_resp["result"]
+                else:
+                    result = "Unknown command response."
 
                 self.language_model.add_tool_response(
                     content=result,
@@ -173,7 +175,7 @@ def generate_list_command():
     return """
     ```json
     {
-        "command": "list"
+        "command": "list_available_servers"
     }
     ```
     """
@@ -182,7 +184,7 @@ def generate_activate_command(server_name):
     return f"""
     ```json
     {{
-        "command": "activate",
+        "command": "activate_server",
         "server_name": "{server_name}"
     }}
     ```
@@ -192,7 +194,7 @@ def generate_execute_commands(server_names, languages, codes):
     calls = []
     for i in range(len(server_names)):
         calls.append({
-            "command": "execute",
+            "command": "execute_server_code",
             "server_name": server_names[i],
             "language": languages[i],
             "code": codes[i]
@@ -203,7 +205,7 @@ def generate_stop_command(server_name):
     return f"""
     ```json
     {{
-        "command": "stop",
+        "command": "stop_server",
         "server_name": "{server_name}"
     }}
     ```
@@ -211,7 +213,7 @@ def generate_stop_command(server_name):
 
 # Example usage
 if __name__ == "__main__":
-    cli_client = CLIClient(mock_flag=False, test_flag=True)
+    cli_client = CLIClient(model_type="openai", mock_flag=False, test_flag=True)
     asyncio.run(cli_client.agent_loop())
 
 
