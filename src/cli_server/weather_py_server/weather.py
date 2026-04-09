@@ -57,6 +57,9 @@ async def get_forecast(
     """
 
     # First get the forecast grid endpoint
+    latitude = round(latitude, 4)
+    longitude = round(longitude, 4)
+
     points_url = f"{NWS_API_BASE}/points/{latitude},{longitude}"
     points_data = await make_nws_request(points_url)
 
@@ -86,13 +89,18 @@ Forecast: {period["detailedForecast"]}
 
 
 
-# def main():
-#     result = asyncio.run(get_forecast(34.0522, -118.2437))
-#     print(result[:200])
-#     logger.info("Example forecast retrieval complete.")
+async def main():
+    # Los Angeles, CA (approx)
+    lat=34.052235
+    lon=-118.243683
+    forecast = await get_forecast(lat, lon)
+    alerts = await get_alerts('CA')
+    print(forecast)
+    print('\n--- ALERTS ---\n')
+    print(alerts)
 
-# if __name__ == "__main__":
-#     main()
+asyncio.run(main())
+
 
 
 

@@ -2,12 +2,12 @@
     {
         "function_declarations": [
             {
-                "name": "list",
+                "name": "list_available_servers",
                 "description": "Get summaries of all available servers.",
                 "parameters": { "type": "object", "properties": {} }
             },
             {
-                "name": "activate",
+                "name": "activate_server",
                 "description": "Activate a server and load its manual.",
                 "parameters": {
                     "type": "object",
@@ -18,7 +18,7 @@
                 }
             },
             {
-                "name": "execute",
+                "name": "execute_server_code",
                 "description": "Execute code on an active server.",
                 "parameters": {
                     "type": "object",
@@ -31,7 +31,7 @@
                 }
             },
             {
-                "name": "stop",
+                "name": "stop_server",
                 "description": "Deactivate a server.",
                 "parameters": {
                     "type": "object",
