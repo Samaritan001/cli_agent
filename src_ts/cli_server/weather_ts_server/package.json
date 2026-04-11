@@ -1,0 +1,19 @@
+{
+  "name": "weather-ts-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/weather_cli.js 8000"
+  },
+  "dependencies": {
+    "fastify": "^5.3.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.3"
+  }
+}
+
