@@ -14,11 +14,13 @@ export type EvalReplayReport = {
   /** Mean of logged bandit rewards (same definition as live `computeBanditReward`). */
   meanBanditReward?: number;
   sumBanditReward?: number;
+  /** `turn_start` events with correctionSignal === true. */
+  correctionSignalCount: number;
   warnings: string[];
 };
 
 /**
- * Read `.cli_agent/eval.jsonl` and summarize profile stability (Phase 1 eval v0).
+ * Read `.cli_agent/eval.jsonl`: profile stability, bandit rewards, correction signals.
  * Does not replay model calls — only inspects logged hashes and rule signals.
  */
 export function analyzeEvalLog(evalJsonlPath: string): EvalReplayReport {
@@ -29,6 +31,7 @@ export function analyzeEvalLog(evalJsonlPath: string): EvalReplayReport {
       turnEndEvents: 0,
       profileHashChanges: 0,
       banditRewardEvents: 0,
+      correctionSignalCount: 0,
       warnings: ["file not found"],
     };
   }
@@ -37,13 +40,17 @@ export function analyzeEvalLog(evalJsonlPath: string): EvalReplayReport {
   const hashes: string[] = [];
   let banditRewardEvents = 0;
   let sumBanditReward = 0;
+  let correctionSignalCount = 0;
   for (const line of lines) {
     try {
       const ev = JSON.parse(line) as EvalEvent;
       if (ev.kind === "turn_end") hashes.push(ev.profileHash);
-      if (ev.kind === "turn_start" && typeof ev.banditRewardPreviousArm === "number") {
-        banditRewardEvents += 1;
-        sumBanditReward += ev.banditRewardPreviousArm;
+      if (ev.kind === "turn_start") {
+        if (ev.correctionSignal === true) correctionSignalCount += 1;
+        if (typeof ev.banditRewardPreviousArm === "number") {
+          banditRewardEvents += 1;
+          sumBanditReward += ev.banditRewardPreviousArm;
+        }
       }
     } catch {
       warnings.push("skipped invalid json line");
@@ -61,6 +68,7 @@ export function analyzeEvalLog(evalJsonlPath: string): EvalReplayReport {
     turnEndEvents: hashes.length,
     profileHashChanges: changes,
     banditRewardEvents,
+    correctionSignalCount,
     ...(banditRewardEvents > 0
       ? {
           meanBanditReward: sumBanditReward / banditRewardEvents,

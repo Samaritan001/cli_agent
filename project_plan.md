@@ -236,16 +236,43 @@ This section turns the design into **build order**, **concrete artifacts**, and 
 
 ### 6.3 Phase 2 — Learning system (implementation checklist)
 
-**Objective:** Data-driven knobs with safety rails.
+**Objective:** Data-driven knobs with safety rails (bounded updates, eval hooks, optional LLM merge).
 
-1. **Richer behavioral signals** in logs (time to next message, tool success, regenerations if available).  
-2. **Discrete “response strategies”** as bandit arms (e.g., terse vs detailed, reactive vs proactive).  
-3. **Contextual bandit** with context = compressed profile + recent summary; reward = engagement / task / negative proxies.  
-4. **KL or bounded coupling** between bandit output and baseline policy.  
-5. **Learned user-profile inference** merged with rules and constraints.  
-6. **Automated metrics:** engagement proxies, alignment with declared `AIProfile`, adaptation speed after a deliberate preference change.
+#### Checklist vs `src_ts/coadapt` (maintain this table when behavior changes)
 
-**Phase 2 exit criteria:** Measurable improvement on at least one proxy vs Phase 1; no runaway personalization.
+| # | Plan item | Status | Where |
+|---|-----------|--------|--------|
+| 1 | Richer behavioral signals in logs | **Partial** | `eval.jsonl` `turn_start`: inter-turn timing, `correctionSignal` (heuristic keywords), tool counts on `turn_end`. Optional: regenerations when the client exposes them. |
+| 2 | Discrete response strategies (bandit arms) | **Done** | `learning/strategies.ts` — `terse` / `balanced` / `detailed`. |
+| 3 | Contextual bandit + engagement-style reward | **Done** | `ContextualLinUCBBandit` + hand-crafted `context_features.ts`; `computeBanditReward` in `learning/reward.ts`. |
+| 4 | KL / bounded coupling | **Partial** | Per-turn `blendAIProfileForArm`, clamps, `computeTurnMetrics`, persisted AI nudge — not a formal KL budget. |
+| 5 | Learned user inference + rules | **Partial** | Heuristics: `profile/inference.ts`. Optional LLM merge: `profile/inference_llm.ts` (`COADAPT_USER_INFERENCE_LLM=1`, throttled, needs `OPENAI_API_KEY`). |
+| 6 | Automated metrics | **Partial** | `eval/metrics.ts`, interaction + eval logs; `analyzeEvalLog` aggregates mean bandit reward + hash churn. |
+
+**Stability (cross-cutting):** per-turn deltas (`rules`, inference), schema clamps on save (`profile_store`), optional **temporal decay** toward 0.5: `COADAPT_PROFILE_DECAY` → `profile/temporal_decay.ts`.
+
+**Profile field reference:** `src_ts/coadapt/profile/PROFILE_TEMPLATES.md`.
+
+#### How to verify Phase 2 “measurable improvement” (operational definition)
+
+1. **Primary proxy (default):** mean **bandit reward** from `eval.jsonl` (`banditRewardPreviousArm` on `turn_start`), reported by `npm run replay:eval`.
+2. **Baseline run:** same usage pattern with learning off — `COADAPT_LEARNING` unset / `0` (no bandit rewards logged; compare other metrics only) **or** keep learning on but compare two saved logs from different sessions.
+3. **Compare two logs:** `npm run eval:compare -- path/to/eval.learning.jsonl path/to/eval.baseline.jsonl` — inspect `deltaMeanBanditReward` (requires rewards on **both** sides).
+4. **Pass / fail:** product-defined threshold on `deltaMeanBanditReward` or on mean `turnMetrics.alignmentProxy` (from interaction JSONL) once you standardize extraction.
+
+**Phase 2 exit criteria (plan wording):** *Measurable improvement on at least one proxy vs Phase 1; no runaway personalization.*  
+- **Improvement:** step 3–4 above.  
+- **Runaway:** watch `profileHashChanges` + warnings in `analyzeEvalLog`; use small `COADAPT_PROFILE_DECAY` if sliders drift too far in long sessions.
+
+#### Env quick reference (Phase 2)
+
+| Variable | Role |
+|----------|------|
+| `COADAPT_LEARNING=1` | Bandit + inference + metrics (alias: `COADAPT_PHASE2=1`). |
+| `COADAPT_LINUCB_ALPHA`, `COADAPT_LINUCB_LAMBDA`, `COADAPT_BANDIT_EPSILON` | LinUCB + exploration. |
+| `COADAPT_USER_INFERENCE_LLM=1` | Optional LLM user inference (after heuristics). |
+| `COADAPT_USER_INFERENCE_LLM_EVERY`, `COADAPT_USER_INFERENCE_LLM_MIN_LEN`, `COADAPT_USER_INFERENCE_MODEL` | Throttle and model. |
+| `COADAPT_PROFILE_DECAY` | Per-turn pull of numeric profiles toward 0.5 (`0` = off). |
 
 ### 6.4 Phase 3 — Co-adaptive intelligence (implementation checklist)
 
@@ -272,15 +299,13 @@ Implement incrementally across phases:
 - **Natural hook:** model and tool assembly (e.g., managers + client) for “profile + memory + tools + base system prompt.”  
 - **Tests:** extend existing patterns under `src/tests/` for rules, bounds, and prompt assembly.
 
-### 6.7 Suggested sprints
+### 6.7 Suggested sprints (historical); next steps toward Phase 3
 
-| Sprint | Focus |
-| ------ | ----- |
-| 1 | Profile schemas, persistence, defaults, logging schema. |
-| 2 | Vector memory, retrieval API, prompt integration. |
-| 3 | Rule engine, stability clamps, metrics logging. |
-| 4 | Fact extraction pipeline, offline replay / evaluation scripts. |
-| 5+ | Bandits, learned inference, then IRL and joint optimization (Phases 2–3). |
+| Priority | Focus |
+| -------- | ----- |
+| Done (TS co-adapt) | Profiles, memory, rules, contextual bandit, replay summaries, optional LLM user inference, decay, eval compare. |
+| Next | Regeneration / explicit feedback signals if the CLI exposes them; tighten Phase 2 eval threshold + fixtures in CI (`EVAL=1`). |
+| Phase 3 | IRL / joint opt / memory graph per §6.4. |
 
 ---
 

@@ -20,6 +20,7 @@ describe("analyzeEvalLog", () => {
     const r = analyzeEvalLog(p);
     expect(r.turnEndEvents).toBe(0);
     expect(r.banditRewardEvents).toBe(0);
+    expect(r.correctionSignalCount).toBe(0);
     expect(r.warnings.some((w) => w.includes("not found"))).toBe(true);
   });
 
@@ -50,6 +51,7 @@ describe("analyzeEvalLog", () => {
     expect(r.turnEndEvents).toBe(2);
     expect(r.profileHashChanges).toBe(1);
     expect(r.banditRewardEvents).toBe(0);
+    expect(r.correctionSignalCount).toBe(0);
   });
 
   it("aggregates bandit rewards from turn_start", () => {

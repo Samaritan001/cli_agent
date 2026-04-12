@@ -45,7 +45,7 @@ export class CLIClient {
       const user_input = await question("--- User Input ---\nEnter your message for the agent (or 'quit' to exit):\n");
       if (user_input.trim().toLowerCase() === "quit") break;
 
-      if (this.co_adapt) this.co_adapt.onUserTurnStart(user_input);
+      if (this.co_adapt) await this.co_adapt.onUserTurnStart(user_input);
       this.language_model.add_user_message(user_input);
       process.stdout.write("\n--- Agent Response ---\n");
 

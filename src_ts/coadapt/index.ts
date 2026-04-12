@@ -8,8 +8,12 @@ export { applyRuleBasedUpdates, MAX_DELTA, type RuleSignals } from "./rules/rule
 export { loadProfiles, saveProfiles, type PersistedProfiles } from "./profile/profile_store";
 export { hashProfiles } from "./profile/profile_hash";
 export { applyUserInference } from "./profile/inference";
+export { mergeUserInferenceLlm, shouldRunUserInferenceLlm } from "./profile/inference_llm";
+export { applyTemporalDecay } from "./profile/temporal_decay";
+export { detectCorrectionSignal } from "./profile/behavioral_signals";
 export { appendEvalLog, evalLogPath, type EvalEvent } from "./eval/eval_log";
 export { analyzeEvalLog, type EvalReplayReport } from "./eval/replay";
+export { compareEvalLogs, type CompareEvalResult } from "./eval/compare_eval";
 export {
   computeTurnMetrics,
   computePhase2TurnMetrics,

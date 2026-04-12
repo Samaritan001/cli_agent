@@ -39,7 +39,7 @@ describe("CLI-equivalent co-adapt (user + AI profiles)", () => {
     expect(baseline.ai.style.conciseVsExploratory).toBe(0.5);
 
     const user1 = "Please explain in detail why caching matters for performance.";
-    session.onUserTurnStart(user1);
+    await session.onUserTurnStart(user1);
     const ctx = await session.buildContextBlock(user1);
     expect(ctx).toContain("User model");
     expect(ctx).toContain("AI profile");
@@ -55,7 +55,7 @@ describe("CLI-equivalent co-adapt (user + AI profiles)", () => {
 
     const user2 =
       "Thanks — say more about invalidation strategies and tradeoffs we should consider in production.";
-    session.onUserTurnStart(user2);
+    await session.onUserTurnStart(user2);
     const afterTurn2Start = loadProfiles(profilesPath);
     expect(afterTurn2Start.ai.style.conciseVsExploratory).toBeLessThan(baseline.ai.style.conciseVsExploratory);
 
@@ -77,15 +77,15 @@ describe("CLI-equivalent co-adapt (user + AI profiles)", () => {
     const profilesPath = path.join(tmp, "profiles.json");
     const session = new CoAdaptSession({ dataDir: tmp, learning: false });
 
-    session.onUserTurnStart("Hello.");
+    await session.onUserTurnStart("Hello.");
     await session.afterTurn("Hello.", "Hi there, how can I help?");
 
-    session.onUserTurnStart("One more thing.");
+    await session.onUserTurnStart("One more thing.");
     await session.afterTurn("One more thing.", "Sure.");
 
     const before = loadProfiles(profilesPath);
 
-    session.onUserTurnStart("Third message.");
+    await session.onUserTurnStart("Third message.");
     const afterRule = loadProfiles(profilesPath);
 
     expect(afterRule.user.cognitiveStyle.detailVsHighLevel).toBeGreaterThan(

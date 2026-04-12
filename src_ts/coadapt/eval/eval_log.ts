@@ -17,6 +17,8 @@ export type EvalEvent =
       /** Learning: reward applied to previous turn's bandit arm when user sends the next message. */
       banditRewardPreviousArm?: number;
       banditPreviousArmIndex?: number;
+      /** Heuristic: user text looks like a correction / disagreement. */
+      correctionSignal?: boolean;
     }
   | {
       kind: "context_built";

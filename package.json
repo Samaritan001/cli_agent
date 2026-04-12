@@ -13,6 +13,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "replay:eval": "tsx src_ts/coadapt/bin/replay_cli.ts",
+    "eval:compare": "tsx src_ts/coadapt/bin/compare_eval_cli.ts",
     "build:weather-image": "docker build -t weather-server:test -f src_ts/cli_server/weather_ts_server/Dockerfile ."
   },
   "dependencies": {

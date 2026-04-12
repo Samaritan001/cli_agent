@@ -3,7 +3,7 @@
  * context for the model, then logs turns, updates vector memory, and writes eval/interaction JSONL.
  *
  * Optional learning (COADAPT_LEARNING=1 or COADAPT_PHASE2=1): contextual LinUCB over arms, reward,
- * heuristic user inference, and turn metrics — see `learning/`, `profile/inference.ts`, `eval/metrics.ts`.
+ * heuristic + optional LLM user inference, temporal decay, and turn metrics — see `profile/`, `learning/`, `eval/metrics.ts`.
  */
 import crypto from "node:crypto";
 import path from "node:path";
@@ -25,7 +25,10 @@ import { appendInteractionLog, interactionLogPath } from "../logs/interaction_lo
 import { getEmbeddingBackendLabel } from "../memory/embeddings";
 import { MemoryStore } from "../memory/memory_store";
 import { defaultAIProfile, defaultUserProfile } from "../profile/defaults";
+import { detectCorrectionSignal } from "../profile/behavioral_signals";
+import { mergeUserInferenceLlm, shouldRunUserInferenceLlm } from "../profile/inference_llm";
 import { applyUserInference } from "../profile/inference";
+import { applyTemporalDecay } from "../profile/temporal_decay";
 import { hashProfiles } from "../profile/profile_hash";
 import { loadProfiles, saveProfiles, type PersistedProfiles } from "../profile/profile_store";
 import type { AIProfile, InteractionTurn, UserProfile } from "../profile/schemas";
@@ -83,6 +86,8 @@ export class CoAdaptSession {
   private lastBanditContext: number[] | null = null;
   /** User wait ms since last turn end, measured at onUserTurnStart (for logging). */
   private lastUserWaitMs: number | null = null;
+  /** Increments each `onUserTurnStart` (for LLM inference throttle). */
+  private userTurnStarts = 0;
 
   constructor(opts?: CoAdaptSessionOptions) {
     this.dataDir = opts?.dataDir ?? process.env.CLI_AGENT_DATA_DIR ?? path.join(process.cwd(), ".cli_agent");
@@ -106,7 +111,11 @@ export class CoAdaptSession {
   }
 
   /** Call at the start of each user turn, before adding the message to model history. Applies rules from the previous turn. */
-  onUserTurnStart(userText: string): void {
+  async onUserTurnStart(userText: string): Promise<void> {
+    const correctionSignal = detectCorrectionSignal(userText);
+    const turnIdx = this.userTurnStarts;
+    this.userTurnStarts += 1;
+
     let banditRewardPreviousArm: number | undefined;
     let banditPreviousArmIndex: number | undefined;
 
@@ -141,6 +150,9 @@ export class CoAdaptSession {
 
     if (this.learningEnabled) {
       user = applyUserInference(user, userText);
+      if (shouldRunUserInferenceLlm(userText, turnIdx)) {
+        user = await mergeUserInferenceLlm(user, userText);
+      }
       if (
         banditRewardPreviousArm !== undefined &&
         banditPreviousArmIndex !== undefined
@@ -148,6 +160,10 @@ export class CoAdaptSession {
         ai = nudgePersistedAiFromBanditReward(ai, armIndexToId(banditPreviousArmIndex), banditRewardPreviousArm);
       }
     }
+
+    const decayed = applyTemporalDecay(user, ai);
+    user = decayed.user;
+    ai = decayed.ai;
 
     this.persisted = {
       ...this.persisted,
@@ -176,6 +192,7 @@ export class CoAdaptSession {
       rulesApplied: appliedRules,
       profileHashBefore,
       profileHashAfter,
+      ...(correctionSignal ? { correctionSignal: true } : {}),
       ...(banditRewardPreviousArm !== undefined
         ? { banditRewardPreviousArm, banditPreviousArmIndex }
         : {}),
@@ -289,6 +306,7 @@ export class CoAdaptSession {
     this.lastChosenArmIndex = null;
     this.lastBanditContext = null;
     this.lastUserWaitMs = null;
+    this.userTurnStarts = 0;
   }
 
   /** Dev / tests: reload profiles from disk. */

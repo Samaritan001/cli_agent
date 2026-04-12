@@ -114,3 +114,14 @@ Wrapper written by `saveProfiles`:
 ```
 
 Fill `user` and `ai` with objects matching the templates above. Partial files are deep-merged with defaults on load.
+
+---
+
+## Optional runtime (Phase 2)
+
+| Env | Effect |
+|-----|--------|
+| `COADAPT_PROFILE_DECAY` | Small positive number (e.g. `0.002`): each save pulls numeric sliders toward `0.5`. `0` or unset = off. |
+| `COADAPT_USER_INFERENCE_LLM=1` | After heuristics, merge optional OpenAI JSON inference (`OPENAI_API_KEY` required). Throttled — see `inference_llm.ts`. |
+
+See `project_plan.md` §6.3 for the full env table and eval workflow (`replay:eval`, `eval:compare`).
