@@ -1,5 +1,5 @@
 /**
- * Paths and helpers for human-readable per-session interaction logs (`logs/<sessionId>.jsonl`).
+ * Paths and helpers for human-readable per-session interaction logs (`<dataDir>/logs/<sessionId>.jsonl`).
  */
 import fs from "node:fs";
 import path from "node:path";

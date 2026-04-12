@@ -297,7 +297,7 @@ Implement incrementally across phases:
 
 - Prefer a **single source of truth** for profiles and memory in one stack (e.g., Python `src/`) unless product requires TS parity.  
 - **Natural hook:** model and tool assembly (e.g., managers + client) for “profile + memory + tools + base system prompt.”  
-- **Tests:** extend existing patterns under `src/tests/` for rules, bounds, and prompt assembly.
+- **Tests:** TypeScript co-adapt tests live under `src_ts/coadapt/tests/` (mirrors package layout); see `vitest.config.ts`.
 
 ### 6.7 Suggested sprints (historical); next steps toward Phase 3
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { defaultAIProfile } from "../profile/defaults";
-import { nudgePersistedAiFromBanditReward } from "./persisted_ai_update";
+import { defaultAIProfile } from "../../profile/defaults";
+import { nudgePersistedAiFromBanditReward } from "../../learning/persisted_ai_update";
 
 describe("nudgePersistedAiFromBanditReward", () => {
   it("moves style toward terse arm when reward is high", () => {

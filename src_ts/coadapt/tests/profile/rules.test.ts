@@ -2,8 +2,8 @@
  * Unit tests for rule-based profile updates (`applyRuleBasedUpdates`).
  */
 import { describe, expect, it } from "vitest";
-import { defaultAIProfile, defaultUserProfile } from "../profile/defaults";
-import { applyRuleBasedUpdates } from "./rules";
+import { defaultAIProfile, defaultUserProfile } from "../../profile/defaults";
+import { applyRuleBasedUpdates } from "../../profile/rules";
 
 describe("applyRuleBasedUpdates", () => {
   it("does not change profiles on first user turn signals", () => {

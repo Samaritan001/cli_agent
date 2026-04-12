@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { defaultUserProfile } from "./defaults";
-import { shouldRunUserInferenceLlm } from "./inference_llm";
+import { defaultUserProfile } from "../../profile/defaults";
+import { shouldRunUserInferenceLlm } from "../../profile/inference_llm";
 
 describe("shouldRunUserInferenceLlm", () => {
   afterEach(() => {

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { EpsilonGreedyBandit } from "./bandit";
+import { EpsilonGreedyBandit } from "../../learning/bandit";
 
 describe("EpsilonGreedyBandit", () => {
   let tmp: string;

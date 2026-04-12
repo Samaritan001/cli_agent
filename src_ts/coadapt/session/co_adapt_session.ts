@@ -2,51 +2,36 @@
  * Orchestrates one co-adaptation session: applies rules at turn start, builds profile+memory
  * context for the model, then logs turns, updates vector memory, and writes eval/interaction JSONL.
  *
- * Optional learning (COADAPT_LEARNING=1 or COADAPT_PHASE2=1): contextual LinUCB over arms, reward,
- * heuristic + optional LLM user inference, temporal decay, and turn metrics — see `profile/`, `learning/`, `eval/metrics.ts`.
+ * Turn-start logic is decomposed in `turn_start.ts`; prompt formatting in `format_profiles_for_prompt.ts`.
  */
 import crypto from "node:crypto";
 import path from "node:path";
 import process from "node:process";
-import { computeTurnMetrics } from "../eval/metrics";
 import { appendEvalLog } from "../eval/eval_log";
-import { extractFacts } from "../extraction/fact_extractor";
-import { buildContextFeatures } from "../learning/context_features";
-import { ContextualLinUCBBandit } from "../learning/contextual_bandit";
-import { computeBanditReward } from "../learning/reward";
-import { nudgePersistedAiFromBanditReward } from "../learning/persisted_ai_update";
+import { computeTurnMetrics } from "../eval/metrics";
+import { extractFacts } from "../memory/fact_extractor";
 import {
   armIndexToId,
   blendAIProfileForArm,
   getStrategyInstruction,
   type BanditArmId,
 } from "../learning/strategies";
-import { appendInteractionLog, interactionLogPath } from "../logs/interaction_log";
+import { appendInteractionLog, interactionLogPath } from "../eval/interaction_log";
 import { getEmbeddingBackendLabel } from "../memory/embeddings";
 import { MemoryStore } from "../memory/memory_store";
 import { defaultAIProfile, defaultUserProfile } from "../profile/defaults";
 import { detectCorrectionSignal } from "../profile/behavioral_signals";
-import { mergeUserInferenceLlm, shouldRunUserInferenceLlm } from "../profile/inference_llm";
-import { applyUserInference } from "../profile/inference";
-import { applyTemporalDecay } from "../profile/temporal_decay";
 import { hashProfiles } from "../profile/profile_hash";
 import { loadProfiles, saveProfiles, type PersistedProfiles } from "../profile/profile_store";
 import type { AIProfile, InteractionTurn, UserProfile } from "../profile/schemas";
-import { applyRuleBasedUpdates } from "../rules/rules";
 import { logInfo } from "../../shared/logging";
-
-function formatProfilesForPrompt(user: UserProfile, ai: AIProfile): string {
-  const lines: string[] = [];
-  lines.push("User model (inferred, 0=low … 1=high):");
-  lines.push(`- responseLength: ${user.preferences.responseLength.toFixed(2)}`);
-  lines.push(`- detailVsHighLevel: ${user.cognitiveStyle.detailVsHighLevel.toFixed(2)}`);
-  lines.push(`- analyticalVsIntuitive: ${user.cognitiveStyle.analyticalVsIntuitive.toFixed(2)}`);
-  lines.push(`AI profile (control knobs):`);
-  lines.push(`- conciseVsExploratory: ${ai.style.conciseVsExploratory.toFixed(2)}`);
-  lines.push(`- depthOfExplanation: ${ai.reasoning.depthOfExplanation.toFixed(2)}`);
-  lines.push(`- reactiveVsProactive: ${ai.initiative.reactiveVsProactive.toFixed(2)}`);
-  return lines.join("\n");
-}
+import { formatProfilesForPrompt } from "./format_profiles_for_prompt";
+import { ContextualLinUCBBandit } from "../learning/contextual_bandit";
+import {
+  applyBanditRewardForPreviousTurn,
+  runTurnStartProfilePipeline,
+  selectBanditArmForNextTurn,
+} from "./turn_start";
 
 export type CoAdaptSessionOptions = {
   /** Defaults to `<cwd>/.cli_agent` or `CLI_AGENT_DATA_DIR`. */
@@ -116,54 +101,36 @@ export class CoAdaptSession {
     const turnIdx = this.userTurnStarts;
     this.userTurnStarts += 1;
 
-    let banditRewardPreviousArm: number | undefined;
-    let banditPreviousArmIndex: number | undefined;
-
-    if (
-      this.learningEnabled &&
-      this.bandit &&
-      this.lastTurnEndTs != null &&
-      this.lastChosenArmIndex != null &&
-      this.lastBanditContext != null
-    ) {
-      this.lastUserWaitMs = Date.now() - this.lastTurnEndTs;
-      const reward = computeBanditReward({
-        nextUserMessageLen: userText.length,
-        msSinceLastTurnEnd: this.lastUserWaitMs,
-        prevAssistantLen: this.prevAssistantLen,
-      });
-      this.bandit.update(this.lastChosenArmIndex, reward, this.lastBanditContext);
-      banditRewardPreviousArm = reward;
-      banditPreviousArmIndex = this.lastChosenArmIndex;
-      logInfo("coadapt", `learning bandit: reward=${reward.toFixed(3)} arm=${this.lastChosenArmIndex}`);
-    } else {
-      this.lastUserWaitMs = this.lastTurnEndTs != null ? Date.now() - this.lastTurnEndTs : null;
+    const rewardStep = applyBanditRewardForPreviousTurn({
+      learningEnabled: this.learningEnabled,
+      bandit: this.bandit,
+      lastTurnEndTs: this.lastTurnEndTs,
+      lastChosenArmIndex: this.lastChosenArmIndex,
+      lastBanditContext: this.lastBanditContext,
+      userText,
+      prevAssistantLen: this.prevAssistantLen,
+    });
+    this.lastUserWaitMs = rewardStep.lastUserWaitMs;
+    if (rewardStep.banditRewardPreviousArm !== undefined) {
+      logInfo(
+        "coadapt",
+        `learning bandit: reward=${rewardStep.banditRewardPreviousArm.toFixed(3)} arm=${this.lastChosenArmIndex}`
+      );
     }
 
     const profileHashBefore = hashProfiles(this.persisted.user, this.persisted.ai);
-    let { user, ai, log, appliedRules } = applyRuleBasedUpdates(this.persisted.user, this.persisted.ai, {
+
+    const { user, ai, log, appliedRules } = await runTurnStartProfilePipeline({
+      learningEnabled: this.learningEnabled,
+      persistedUser: this.persisted.user,
+      persistedAi: this.persisted.ai,
+      userText,
       completedUserTurns: this.completedTurns,
       prevAssistantLen: this.prevAssistantLen,
-      currentUserLen: userText.length,
-      hasPreviousAssistant: this.completedTurns > 0,
+      turnIdx,
+      banditRewardPreviousArm: rewardStep.banditRewardPreviousArm,
+      banditPreviousArmIndex: rewardStep.banditPreviousArmIndex,
     });
-
-    if (this.learningEnabled) {
-      user = applyUserInference(user, userText);
-      if (shouldRunUserInferenceLlm(userText, turnIdx)) {
-        user = await mergeUserInferenceLlm(user, userText);
-      }
-      if (
-        banditRewardPreviousArm !== undefined &&
-        banditPreviousArmIndex !== undefined
-      ) {
-        ai = nudgePersistedAiFromBanditReward(ai, armIndexToId(banditPreviousArmIndex), banditRewardPreviousArm);
-      }
-    }
-
-    const decayed = applyTemporalDecay(user, ai);
-    user = decayed.user;
-    ai = decayed.ai;
 
     this.persisted = {
       ...this.persisted,
@@ -174,13 +141,16 @@ export class CoAdaptSession {
     saveProfiles(this.profilesPath, this.persisted);
     const profileHashAfter = hashProfiles(this.persisted.user, this.persisted.ai);
 
-    if (this.learningEnabled && this.bandit) {
-      const ctx = buildContextFeatures(user, {
-        userMessageLen: userText.length,
-        completedUserTurns: this.completedTurns,
-      });
-      this.lastBanditContext = ctx;
-      this.lastChosenArmIndex = this.bandit.selectArm(ctx);
+    const armStep = selectBanditArmForNextTurn({
+      learningEnabled: this.learningEnabled,
+      bandit: this.bandit,
+      user: this.persisted.user,
+      userText,
+      completedUserTurns: this.completedTurns,
+    });
+    this.lastBanditContext = armStep.lastBanditContext;
+    this.lastChosenArmIndex = armStep.lastChosenArmIndex;
+    if (this.lastChosenArmIndex != null) {
       logInfo("coadapt", `learning bandit: selected arm=${this.lastChosenArmIndex}`);
     }
 
@@ -193,8 +163,11 @@ export class CoAdaptSession {
       profileHashBefore,
       profileHashAfter,
       ...(correctionSignal ? { correctionSignal: true } : {}),
-      ...(banditRewardPreviousArm !== undefined
-        ? { banditRewardPreviousArm, banditPreviousArmIndex }
+      ...(rewardStep.banditRewardPreviousArm !== undefined
+        ? {
+            banditRewardPreviousArm: rewardStep.banditRewardPreviousArm,
+            banditPreviousArmIndex: rewardStep.banditPreviousArmIndex,
+          }
         : {}),
     });
     for (const line of log) logInfo("coadapt", `rule: ${line}`);

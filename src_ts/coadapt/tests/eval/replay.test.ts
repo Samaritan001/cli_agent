@@ -5,8 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { appendEvalLog, evalLogPath } from "./eval_log";
-import { analyzeEvalLog } from "./replay";
+import { appendEvalLog, evalLogPath } from "../../eval/eval_log";
+import { analyzeEvalLog } from "../../eval/replay";
 
 describe("analyzeEvalLog", () => {
   let dir: string;

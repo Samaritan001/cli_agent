@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defaultUserProfile } from "../profile/defaults";
-import { buildContextFeatures } from "./context_features";
-import { ContextualLinUCBBandit, solveLinearSystem } from "./contextual_bandit";
+import { defaultUserProfile } from "../../profile/defaults";
+import { buildContextFeatures } from "../../learning/context_features";
+import { ContextualLinUCBBandit, solveLinearSystem } from "../../learning/contextual_bandit";
 
 describe("solveLinearSystem", () => {
   it("solves 2×2", () => {

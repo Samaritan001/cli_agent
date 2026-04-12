@@ -12,8 +12,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CoAdaptSession } from "../coadapt";
-import { loadProfiles } from "../coadapt/profile/profile_store";
+import { CoAdaptSession } from "../..";
+import { loadProfiles } from "../../profile/profile_store";
 
 describe("CLI-equivalent co-adapt (user + AI profiles)", () => {
   let tmp: string;

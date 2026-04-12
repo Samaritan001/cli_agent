@@ -6,7 +6,7 @@ import {
   UserProfileSchema,
   type AIProfile,
   type UserProfile,
-} from "../profile/schemas";
+} from "./schemas";
 
 export type RuleSignals = {
   /** Completed user turns before this one (0 = first message in session). */

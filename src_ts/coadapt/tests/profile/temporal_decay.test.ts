@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { defaultUserProfile, defaultAIProfile } from "./defaults";
-import { applyTemporalDecay } from "./temporal_decay";
+import { defaultUserProfile, defaultAIProfile } from "../../profile/defaults";
+import { applyTemporalDecay } from "../../profile/temporal_decay";
 
 describe("applyTemporalDecay", () => {
   afterEach(() => {
