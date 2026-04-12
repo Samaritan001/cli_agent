@@ -2,8 +2,8 @@
  * Orchestrates one co-adaptation session: applies rules at turn start, builds profile+memory
  * context for the model, then logs turns, updates vector memory, and writes eval/interaction JSONL.
  *
- * Optional learning (COADAPT_LEARNING=1 or COADAPT_PHASE2=1): bandit arms, reward, heuristic user
- * inference, and turn metrics — see `learning/`, `profile/inference.ts`, `eval/metrics.ts`.
+ * Optional learning (COADAPT_LEARNING=1 or COADAPT_PHASE2=1): contextual LinUCB over arms, reward,
+ * heuristic user inference, and turn metrics — see `learning/`, `profile/inference.ts`, `eval/metrics.ts`.
  */
 import crypto from "node:crypto";
 import path from "node:path";
@@ -11,7 +11,8 @@ import process from "node:process";
 import { computeTurnMetrics } from "../eval/metrics";
 import { appendEvalLog } from "../eval/eval_log";
 import { extractFacts } from "../extraction/fact_extractor";
-import { EpsilonGreedyBandit } from "../learning/bandit";
+import { buildContextFeatures } from "../learning/context_features";
+import { ContextualLinUCBBandit } from "../learning/contextual_bandit";
 import { computeBanditReward } from "../learning/reward";
 import { nudgePersistedAiFromBanditReward } from "../learning/persisted_ai_update";
 import {
@@ -69,7 +70,7 @@ export class CoAdaptSession {
   private readonly memory: MemoryStore;
   private readonly memoryTopK: number;
   private readonly learningEnabled: boolean;
-  private bandit: EpsilonGreedyBandit | null = null;
+  private bandit: ContextualLinUCBBandit | null = null;
 
   private persisted: PersistedProfiles;
   private completedTurns = 0;
@@ -78,6 +79,8 @@ export class CoAdaptSession {
   private lastTurnEndTs: number | null = null;
   /** Arm index chosen for the current turn (prompt blend); updated each onUserTurnStart. */
   private lastChosenArmIndex: number | null = null;
+  /** Context vector used when `lastChosenArmIndex` was selected (for LinUCB update). */
+  private lastBanditContext: number[] | null = null;
   /** User wait ms since last turn end, measured at onUserTurnStart (for logging). */
   private lastUserWaitMs: number | null = null;
 
@@ -90,7 +93,7 @@ export class CoAdaptSession {
     this.memory = new MemoryStore(path.join(this.dataDir, "memory.json"));
     this.persisted = loadProfiles(this.profilesPath);
     if (this.learningEnabled) {
-      this.bandit = new EpsilonGreedyBandit(path.join(this.dataDir, "bandit.json"));
+      this.bandit = new ContextualLinUCBBandit(path.join(this.dataDir, "bandit.json"));
     }
   }
 
@@ -107,14 +110,20 @@ export class CoAdaptSession {
     let banditRewardPreviousArm: number | undefined;
     let banditPreviousArmIndex: number | undefined;
 
-    if (this.learningEnabled && this.bandit && this.lastTurnEndTs != null && this.lastChosenArmIndex != null) {
+    if (
+      this.learningEnabled &&
+      this.bandit &&
+      this.lastTurnEndTs != null &&
+      this.lastChosenArmIndex != null &&
+      this.lastBanditContext != null
+    ) {
       this.lastUserWaitMs = Date.now() - this.lastTurnEndTs;
       const reward = computeBanditReward({
         nextUserMessageLen: userText.length,
         msSinceLastTurnEnd: this.lastUserWaitMs,
         prevAssistantLen: this.prevAssistantLen,
       });
-      this.bandit.update(this.lastChosenArmIndex, reward);
+      this.bandit.update(this.lastChosenArmIndex, reward, this.lastBanditContext);
       banditRewardPreviousArm = reward;
       banditPreviousArmIndex = this.lastChosenArmIndex;
       logInfo("coadapt", `learning bandit: reward=${reward.toFixed(3)} arm=${this.lastChosenArmIndex}`);
@@ -150,7 +159,12 @@ export class CoAdaptSession {
     const profileHashAfter = hashProfiles(this.persisted.user, this.persisted.ai);
 
     if (this.learningEnabled && this.bandit) {
-      this.lastChosenArmIndex = this.bandit.selectArm();
+      const ctx = buildContextFeatures(user, {
+        userMessageLen: userText.length,
+        completedUserTurns: this.completedTurns,
+      });
+      this.lastBanditContext = ctx;
+      this.lastChosenArmIndex = this.bandit.selectArm(ctx);
       logInfo("coadapt", `learning bandit: selected arm=${this.lastChosenArmIndex}`);
     }
 
@@ -273,6 +287,7 @@ export class CoAdaptSession {
     this.prevAssistantLen = 0;
     this.lastTurnEndTs = null;
     this.lastChosenArmIndex = null;
+    this.lastBanditContext = null;
     this.lastUserWaitMs = null;
   }
 

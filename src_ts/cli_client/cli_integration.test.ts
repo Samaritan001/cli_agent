@@ -63,8 +63,14 @@ describe("CLI-equivalent co-adapt (user + AI profiles)", () => {
 
     const banditPath = path.join(tmp, "bandit.json");
     expect(fs.existsSync(banditPath)).toBe(true);
-    const banditRaw = JSON.parse(fs.readFileSync(banditPath, "utf8")) as { arms: { count: number }[] };
-    expect(banditRaw.arms.some((a) => a.count >= 1)).toBe(true);
+    const banditRaw = JSON.parse(fs.readFileSync(banditPath, "utf8")) as {
+      version: number;
+      arms: { updateCount?: number; count?: number }[];
+    };
+    expect(banditRaw.version).toBe(2);
+    expect(
+      banditRaw.arms.some((a) => (a.updateCount ?? a.count ?? 0) >= 1)
+    ).toBe(true);
   });
 
   it("rule followups_depth applies after enough completed turns (user + AI)", async () => {

@@ -19,6 +19,7 @@ describe("analyzeEvalLog", () => {
     const p = path.join(os.tmpdir(), `eval-missing-${Date.now()}.jsonl`);
     const r = analyzeEvalLog(p);
     expect(r.turnEndEvents).toBe(0);
+    expect(r.banditRewardEvents).toBe(0);
     expect(r.warnings.some((w) => w.includes("not found"))).toBe(true);
   });
 
@@ -48,5 +49,36 @@ describe("analyzeEvalLog", () => {
     const r = analyzeEvalLog(p);
     expect(r.turnEndEvents).toBe(2);
     expect(r.profileHashChanges).toBe(1);
+    expect(r.banditRewardEvents).toBe(0);
+  });
+
+  it("aggregates bandit rewards from turn_start", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "coadapt-eval-br-"));
+    appendEvalLog(dir, {
+      kind: "turn_start",
+      ts: "t0",
+      sessionId: "s",
+      userTurnIndex: 1,
+      rulesApplied: [],
+      profileHashBefore: "a",
+      profileHashAfter: "b",
+      banditRewardPreviousArm: 0.6,
+      banditPreviousArmIndex: 0,
+    });
+    appendEvalLog(dir, {
+      kind: "turn_start",
+      ts: "t1",
+      sessionId: "s",
+      userTurnIndex: 2,
+      rulesApplied: [],
+      profileHashBefore: "b",
+      profileHashAfter: "c",
+      banditRewardPreviousArm: 0.8,
+      banditPreviousArmIndex: 1,
+    });
+    const r = analyzeEvalLog(evalLogPath(dir));
+    expect(r.banditRewardEvents).toBe(2);
+    expect(r.sumBanditReward).toBeCloseTo(1.4, 5);
+    expect(r.meanBanditReward).toBeCloseTo(0.7, 5);
   });
 });

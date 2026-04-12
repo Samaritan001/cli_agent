@@ -33,6 +33,13 @@ export {
   type BanditArmStats,
   type BanditState,
 } from "./learning/bandit";
+export {
+  ContextualLinUCBBandit,
+  type ContextualBanditStateV2,
+  type LinucbArmState,
+  solveLinearSystem,
+} from "./learning/contextual_bandit";
+export { CONTEXT_FEATURE_DIM, buildContextFeatures, type ContextFeatureSignals } from "./learning/context_features";
 export { computeBanditReward, type BanditRewardSignals } from "./learning/reward";
 export {
   BANDIT_ARM_IDS,

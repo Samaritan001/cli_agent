@@ -1,5 +1,6 @@
 /**
- * Offline analysis of `eval.jsonl`: summarizes profile-hash churn from `turn_end` events (not LLM replay).
+ * Offline analysis of `eval.jsonl`: profile-hash churn from `turn_end`, and bandit reward stats from
+ * `turn_start` (`banditRewardPreviousArm`) when learning is enabled — not LLM replay.
  */
 import fs from "node:fs";
 import type { EvalEvent } from "./eval_log";
@@ -8,6 +9,11 @@ export type EvalReplayReport = {
   path: string;
   turnEndEvents: number;
   profileHashChanges: number;
+  /** `turn_start` events that include `banditRewardPreviousArm` (learning). */
+  banditRewardEvents: number;
+  /** Mean of logged bandit rewards (same definition as live `computeBanditReward`). */
+  meanBanditReward?: number;
+  sumBanditReward?: number;
   warnings: string[];
 };
 
@@ -22,16 +28,23 @@ export function analyzeEvalLog(evalJsonlPath: string): EvalReplayReport {
       path: evalJsonlPath,
       turnEndEvents: 0,
       profileHashChanges: 0,
+      banditRewardEvents: 0,
       warnings: ["file not found"],
     };
   }
   const raw = fs.readFileSync(evalJsonlPath, "utf8");
   const lines = raw.trim().split("\n").filter(Boolean);
   const hashes: string[] = [];
+  let banditRewardEvents = 0;
+  let sumBanditReward = 0;
   for (const line of lines) {
     try {
       const ev = JSON.parse(line) as EvalEvent;
       if (ev.kind === "turn_end") hashes.push(ev.profileHash);
+      if (ev.kind === "turn_start" && typeof ev.banditRewardPreviousArm === "number") {
+        banditRewardEvents += 1;
+        sumBanditReward += ev.banditRewardPreviousArm;
+      }
     } catch {
       warnings.push("skipped invalid json line");
     }
@@ -47,6 +60,13 @@ export function analyzeEvalLog(evalJsonlPath: string): EvalReplayReport {
     path: evalJsonlPath,
     turnEndEvents: hashes.length,
     profileHashChanges: changes,
+    banditRewardEvents,
+    ...(banditRewardEvents > 0
+      ? {
+          meanBanditReward: sumBanditReward / banditRewardEvents,
+          sumBanditReward,
+        }
+      : {}),
     warnings,
   };
 }
