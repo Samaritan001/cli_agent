@@ -41,8 +41,28 @@ export class MemoryStore {
     fs.writeFileSync(this.filePath, JSON.stringify(out), "utf8");
   }
 
-  async addTurnChunk(userText: string, assistantText: string): Promise<void> {
-    const text = `User: ${userText.slice(0, 4000)}\nAssistant: ${assistantText.slice(0, 4000)}`;
+  async retrieveWithScores(query: string, k: number): Promise<{ chunk: MemoryChunk; score: number }[]> {
+    if (this.chunks.length === 0 || !query.trim()) return [];
+    const q = await embedText(query);
+    const scored = this.chunks.map((c) => ({ chunk: c, score: cosine(q, c.embedding) }));
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, k);
+  }
+
+  async retrieve(query: string, k: number): Promise<MemoryChunk[]> {
+    const hits = await this.retrieveWithScores(query, k);
+    return hits.map((h) => h.chunk);
+  }
+
+  async addTurnChunk(
+    userText: string,
+    assistantText: string,
+    opts?: { facts?: string[] }
+  ): Promise<void> {
+    let text = `User: ${userText.slice(0, 4000)}\nAssistant: ${assistantText.slice(0, 4000)}`;
+    if (opts?.facts && opts.facts.length > 0) {
+      text += `\nFacts:\n${opts.facts.map((f) => `- ${f}`).join("\n")}`;
+    }
     const embedding = await embedText(text);
     const chunk: MemoryChunk = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
@@ -53,13 +73,5 @@ export class MemoryStore {
     this.chunks.push(chunk);
     if (this.chunks.length > MAX_CHUNKS) this.chunks = this.chunks.slice(-MAX_CHUNKS);
     this.persist();
-  }
-
-  async retrieve(query: string, k: number): Promise<MemoryChunk[]> {
-    if (this.chunks.length === 0 || !query.trim()) return [];
-    const q = await embedText(query);
-    const scored = this.chunks.map((c) => ({ c, s: cosine(q, c.embedding) }));
-    scored.sort((a, b) => b.s - a.s);
-    return scored.slice(0, k).map((x) => x.c);
   }
 }

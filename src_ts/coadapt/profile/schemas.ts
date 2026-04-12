@@ -57,6 +57,10 @@ export const InteractionTurnSchema = z.object({
   userText: z.string(),
   assistantText: z.string(),
   userTurnIndex: z.number().int().nonnegative(),
+  turnId: z.string().uuid().optional(),
+  profileHashAtEnd: z.string().optional(),
+  extractedFacts: z.array(z.string()).max(20).optional(),
+  toolCallsCount: z.number().int().nonnegative().optional(),
 });
 
 export type InteractionTurn = z.infer<typeof InteractionTurnSchema>;

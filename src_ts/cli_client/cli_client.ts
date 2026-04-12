@@ -59,9 +59,12 @@ export class CLIClient {
       await setCoAdapt();
 
       let turn_assistant = "";
+      let tool_calls_total = 0;
       let llm_output: ParsedResponse = this.language_model.parse_response(
         await this.language_model.generate_response(this.tool_manager.getToolInfo())
       );
+
+      tool_calls_total += ((llm_output.tool_calls as ToolCall[]) ?? []).length;
 
       if (this.test_flag) process.stdout.write(`LLM Output (with tool calls):\n${JSON.stringify(llm_output, null, 2)}\n\n`);
 
@@ -77,6 +80,7 @@ export class CLIClient {
         llm_output = this.language_model.parse_response(
           await this.language_model.generate_response(this.tool_manager.getToolInfo())
         );
+        tool_calls_total += ((llm_output.tool_calls as ToolCall[]) ?? []).length;
         if (this.test_flag) process.stdout.write(`LLM Output (with tool calls):\n${JSON.stringify(llm_output, null, 2)}\n\n`);
         if (llm_output.content) {
           process.stdout.write(`${llm_output.content}\n\n`);
@@ -85,7 +89,8 @@ export class CLIClient {
         tool_calls = (llm_output.tool_calls as any) ?? [];
       }
 
-      if (this.co_adapt) await this.co_adapt.afterTurn(user_input, turn_assistant.trim());
+      if (this.co_adapt)
+        await this.co_adapt.afterTurn(user_input, turn_assistant.trim(), { toolCallsCount: tool_calls_total });
     }
 
     rl.close();

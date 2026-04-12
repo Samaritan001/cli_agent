@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { defaultAIProfile, defaultUserProfile } from "../profile/defaults";
 import { applyRuleBasedUpdates } from "./rules";
-import { defaultAIProfile, defaultUserProfile } from "./defaults";
 
 describe("applyRuleBasedUpdates", () => {
   it("does not change profiles on first user turn signals", () => {
@@ -15,6 +15,7 @@ describe("applyRuleBasedUpdates", () => {
     expect(out.user).toEqual(u);
     expect(out.ai).toEqual(a);
     expect(out.log).toEqual([]);
+    expect(out.appliedRules).toEqual([]);
   });
 
   it("increases depth after enough completed turns", () => {
@@ -30,6 +31,7 @@ describe("applyRuleBasedUpdates", () => {
     expect(out.user.cognitiveStyle.detailVsHighLevel).toBeGreaterThan(beforeDetail);
     expect(out.ai.reasoning.depthOfExplanation).toBeGreaterThan(a.reasoning.depthOfExplanation);
     expect(out.log.some((l) => l.includes("followups"))).toBe(true);
+    expect(out.appliedRules.some((r) => r.id === "followups_depth")).toBe(true);
   });
 
   it("shifts toward concise when user sends short reply after long assistant", () => {
@@ -44,5 +46,6 @@ describe("applyRuleBasedUpdates", () => {
     });
     expect(out.ai.style.conciseVsExploratory).toBeLessThan(before);
     expect(out.log.some((l) => l.includes("long_reply_short_user"))).toBe(true);
+    expect(out.appliedRules.some((r) => r.id === "long_reply_short_user")).toBe(true);
   });
 });

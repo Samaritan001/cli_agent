@@ -1,7 +1,12 @@
-export { CoAdaptSession, type CoAdaptSessionOptions } from "./co_adapt_session";
-export { MemoryStore, type MemoryChunk } from "./memory_store";
-export { applyRuleBasedUpdates, MAX_DELTA, type RuleSignals } from "./rules";
-export { loadProfiles, saveProfiles, type PersistedProfiles } from "./profile_store";
+export { CoAdaptSession, type CoAdaptSessionOptions } from "./session/co_adapt_session";
+export { MemoryStore, type MemoryChunk } from "./memory/memory_store";
+export { applyRuleBasedUpdates, MAX_DELTA, type RuleSignals } from "./rules/rules";
+export { loadProfiles, saveProfiles, type PersistedProfiles } from "./profile/profile_store";
+export { hashProfiles } from "./profile/profile_hash";
+export { appendEvalLog, evalLogPath, type EvalEvent } from "./eval/eval_log";
+export { analyzeEvalLog, type EvalReplayReport } from "./eval/replay";
+export { extractFacts } from "./extraction/fact_extractor";
+export { getEmbeddingBackendLabel } from "./memory/embeddings";
 export {
   UserProfileSchema,
   AIProfileSchema,
@@ -9,5 +14,5 @@ export {
   type UserProfile,
   type AIProfile,
   type InteractionTurn,
-} from "./schemas";
-export { defaultUserProfile, defaultAIProfile } from "./defaults";
+} from "./profile/schemas";
+export { defaultUserProfile, defaultAIProfile } from "./profile/defaults";

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { InteractionTurn } from "./schemas";
+import type { InteractionTurn } from "../profile/schemas";
 
 export function appendInteractionLog(filePath: string, turn: InteractionTurn): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });

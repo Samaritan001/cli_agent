@@ -1,12 +1,17 @@
+import crypto from "node:crypto";
 import path from "node:path";
 import process from "node:process";
-import { appendInteractionLog, interactionLogPath } from "./interaction_log";
-import { loadProfiles, saveProfiles, type PersistedProfiles } from "./profile_store";
-import { MemoryStore } from "./memory_store";
-import { applyRuleBasedUpdates } from "./rules";
-import { defaultAIProfile, defaultUserProfile } from "./defaults";
-import type { AIProfile, InteractionTurn, UserProfile } from "./schemas";
-import { logInfo } from "../shared/logging";
+import { extractFacts } from "../extraction/fact_extractor";
+import { appendEvalLog } from "../eval/eval_log";
+import { getEmbeddingBackendLabel } from "../memory/embeddings";
+import { MemoryStore } from "../memory/memory_store";
+import { appendInteractionLog, interactionLogPath } from "../logs/interaction_log";
+import { defaultAIProfile, defaultUserProfile } from "../profile/defaults";
+import { hashProfiles } from "../profile/profile_hash";
+import { loadProfiles, saveProfiles, type PersistedProfiles } from "../profile/profile_store";
+import type { AIProfile, InteractionTurn, UserProfile } from "../profile/schemas";
+import { applyRuleBasedUpdates } from "../rules/rules";
+import { logInfo } from "../../shared/logging";
 
 function formatProfilesForPrompt(user: UserProfile, ai: AIProfile): string {
   const lines: string[] = [];
@@ -59,7 +64,8 @@ export class CoAdaptSession {
 
   /** Call at the start of each user turn, before adding the message to model history. Applies rules from the previous turn. */
   onUserTurnStart(userText: string): void {
-    const { user, ai, log } = applyRuleBasedUpdates(this.persisted.user, this.persisted.ai, {
+    const profileHashBefore = hashProfiles(this.persisted.user, this.persisted.ai);
+    const { user, ai, log, appliedRules } = applyRuleBasedUpdates(this.persisted.user, this.persisted.ai, {
       completedUserTurns: this.completedTurns,
       prevAssistantLen: this.prevAssistantLen,
       currentUserLen: userText.length,
@@ -72,12 +78,31 @@ export class CoAdaptSession {
       updatedAt: new Date().toISOString(),
     };
     saveProfiles(this.profilesPath, this.persisted);
+    const profileHashAfter = hashProfiles(this.persisted.user, this.persisted.ai);
+    appendEvalLog(this.dataDir, {
+      kind: "turn_start",
+      ts: new Date().toISOString(),
+      sessionId: this.sessionId,
+      userTurnIndex: this.completedTurns,
+      rulesApplied: appliedRules,
+      profileHashBefore,
+      profileHashAfter,
+    });
     for (const line of log) logInfo("coadapt", `rule: ${line}`);
   }
 
   /** Build system augmentation: profiles + retrieved memory for the last user message. */
   async buildContextBlock(lastUserMessage: string): Promise<string> {
-    const mem = await this.memory.retrieve(lastUserMessage, this.memoryTopK);
+    const hits = await this.memory.retrieveWithScores(lastUserMessage, this.memoryTopK);
+    const mem = hits.map((h) => h.chunk);
+    appendEvalLog(this.dataDir, {
+      kind: "context_built",
+      ts: new Date().toISOString(),
+      sessionId: this.sessionId,
+      userTurnIndex: this.completedTurns,
+      embeddingBackend: getEmbeddingBackendLabel(),
+      retrieval: hits.map((h) => ({ chunkId: h.chunk.id, score: h.score })),
+    });
     const parts: string[] = [];
     parts.push(formatProfilesForPrompt(this.persisted.user, this.persisted.ai));
     if (mem.length > 0) {
@@ -90,19 +115,43 @@ export class CoAdaptSession {
   }
 
   /** After assistant output for this user message is finalized (including tool loop). */
-  async afterTurn(userText: string, assistantText: string): Promise<void> {
+  async afterTurn(
+    userText: string,
+    assistantText: string,
+    meta?: { toolCallsCount?: number }
+  ): Promise<void> {
+    const turnIndex = this.completedTurns;
+    const turnId = crypto.randomUUID();
+    const facts = await extractFacts(userText, assistantText);
+    await this.memory.addTurnChunk(userText, assistantText, { facts: facts.length > 0 ? facts : undefined });
+
+    const profileHash = hashProfiles(this.persisted.user, this.persisted.ai);
     const turn: InteractionTurn = {
       ts: new Date().toISOString(),
       sessionId: this.sessionId,
       userText,
       assistantText,
-      userTurnIndex: this.completedTurns,
+      userTurnIndex: turnIndex,
+      turnId,
+      profileHashAtEnd: profileHash,
+      extractedFacts: facts.length > 0 ? facts : undefined,
+      toolCallsCount: meta?.toolCallsCount ?? 0,
     };
     appendInteractionLog(interactionLogPath(this.dataDir, this.sessionId), turn);
-    await this.memory.addTurnChunk(userText, assistantText);
+    appendEvalLog(this.dataDir, {
+      kind: "turn_end",
+      ts: new Date().toISOString(),
+      sessionId: this.sessionId,
+      userTurnIndex: turnIndex,
+      turnId,
+      profileHash,
+      toolCallsCount: meta?.toolCallsCount ?? 0,
+      extractedFactsCount: facts.length,
+    });
+
     this.prevAssistantLen = assistantText.length;
     this.completedTurns += 1;
-    logInfo("coadapt", `turn ${this.completedTurns} logged; memory updated`);
+    logInfo("coadapt", `turn ${this.completedTurns} logged; memory + eval updated`);
   }
 
   /** Reset session counters (profiles and memory persist). */
