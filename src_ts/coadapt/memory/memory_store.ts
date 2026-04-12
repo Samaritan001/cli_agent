@@ -1,3 +1,6 @@
+/**
+ * Persists conversation chunks with embeddings; retrieves top-k by cosine similarity to a query.
+ */
 import fs from "node:fs";
 import path from "node:path";
 import { cosine, embedText } from "./embeddings";

@@ -1,3 +1,7 @@
+/**
+ * Text embeddings for memory retrieval: OpenAI `text-embedding-3-small` at 256 dims when configured,
+ * otherwise deterministic hash vectors; cosine similarity helpers.
+ */
 import crypto from "node:crypto";
 import OpenAI from "openai";
 

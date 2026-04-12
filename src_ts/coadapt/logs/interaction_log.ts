@@ -1,3 +1,6 @@
+/**
+ * Paths and helpers for human-readable per-session interaction logs (`logs/<sessionId>.jsonl`).
+ */
 import fs from "node:fs";
 import path from "node:path";
 import type { InteractionTurn } from "../profile/schemas";

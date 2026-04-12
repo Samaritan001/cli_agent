@@ -1,3 +1,6 @@
+/**
+ * Load and save `profiles.json` with deep-merge for partial files and clamping of numeric fields.
+ */
 import fs from "node:fs";
 import path from "node:path";
 import {

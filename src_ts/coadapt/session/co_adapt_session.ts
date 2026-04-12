@@ -1,3 +1,7 @@
+/**
+ * Orchestrates one co-adaptation session: applies rules at turn start, builds profile+memory
+ * context for the model, then logs turns, updates vector memory, and writes eval/interaction JSONL.
+ */
 import crypto from "node:crypto";
 import path from "node:path";
 import process from "node:process";

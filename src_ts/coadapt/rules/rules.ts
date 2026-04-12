@@ -1,3 +1,6 @@
+/**
+ * Phase 1 rule-based updates: bounded nudges to user/AI profiles from simple behavioral signals.
+ */
 import {
   AIProfileSchema,
   UserProfileSchema,

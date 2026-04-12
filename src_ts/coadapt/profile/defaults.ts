@@ -1,3 +1,6 @@
+/**
+ * Neutral default values (0.5 sliders) for new or reset user and AI profiles.
+ */
 import type { AIProfile, UserProfile } from "./schemas";
 
 const mid = 0.5;

@@ -1,3 +1,6 @@
+/**
+ * Append-only structured events (`turn_start`, `context_built`, `turn_end`) to `eval.jsonl` for analytics.
+ */
 import fs from "node:fs";
 import path from "node:path";
 

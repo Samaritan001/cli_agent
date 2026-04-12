@@ -1,3 +1,6 @@
+/**
+ * Offline analysis of `eval.jsonl`: summarizes profile-hash churn from `turn_end` events (not LLM replay).
+ */
 import fs from "node:fs";
 import type { EvalEvent } from "./eval_log";
 

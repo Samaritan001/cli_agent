@@ -1,3 +1,6 @@
+/**
+ * Short stable fingerprint of the current user+AI profiles for eval logs and replay checks.
+ */
 import crypto from "node:crypto";
 import type { AIProfile, UserProfile } from "./schemas";
 

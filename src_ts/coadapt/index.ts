@@ -1,3 +1,7 @@
+/**
+ * Co-adaptation package public surface: session orchestration, profiles, memory, rules,
+ * evaluation logging, replay analysis, and fact extraction. Import from here in app code.
+ */
 export { CoAdaptSession, type CoAdaptSessionOptions } from "./session/co_adapt_session";
 export { MemoryStore, type MemoryChunk } from "./memory/memory_store";
 export { applyRuleBasedUpdates, MAX_DELTA, type RuleSignals } from "./rules/rules";

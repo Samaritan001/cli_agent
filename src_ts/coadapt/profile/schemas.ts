@@ -1,3 +1,6 @@
+/**
+ * Zod schemas and TypeScript types for user profile, AI profile, and interaction-turn records.
+ */
 import { z } from "zod";
 
 /** Bounded 0–1 sliders; lists hold optional human-readable tags. */

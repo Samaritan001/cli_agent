@@ -1,3 +1,6 @@
+/**
+ * Derives short factual bullets from a user/assistant pair via LLM JSON or heuristic fallback.
+ */
 import OpenAI from "openai";
 
 const FACTS_SCHEMA = `{"facts":["string"]}`;
