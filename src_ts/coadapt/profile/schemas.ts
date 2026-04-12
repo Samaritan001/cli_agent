@@ -64,6 +64,18 @@ export const InteractionTurnSchema = z.object({
   profileHashAtEnd: z.string().optional(),
   extractedFacts: z.array(z.string()).max(20).optional(),
   toolCallsCount: z.number().int().nonnegative().optional(),
+  /** Phase 2: bandit arm used for this turn's blended prompt (if enabled). */
+  banditArmId: z.string().optional(),
+  banditArmIndex: z.number().int().nonnegative().optional(),
+  /** ms from previous turn's afterTurn to this user message (Phase 2 engagement signal). */
+  msSincePreviousTurnEnd: z.number().nonnegative().optional(),
+  turnMetrics: z
+    .object({
+      engagementProxy: z.number(),
+      alignmentProxy: z.number(),
+      consistencyProxy: z.number(),
+    })
+    .optional(),
 });
 
 export type InteractionTurn = z.infer<typeof InteractionTurnSchema>;

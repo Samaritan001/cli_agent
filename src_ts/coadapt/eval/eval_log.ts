@@ -3,6 +3,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import type { TurnMetrics } from "./metrics";
 
 export type EvalEvent =
   | {
@@ -13,6 +14,9 @@ export type EvalEvent =
       rulesApplied: { id: string; message: string }[];
       profileHashBefore: string;
       profileHashAfter: string;
+      /** Learning: reward applied to previous turn's bandit arm when user sends the next message. */
+      banditRewardPreviousArm?: number;
+      banditPreviousArmIndex?: number;
     }
   | {
       kind: "context_built";
@@ -31,6 +35,9 @@ export type EvalEvent =
       profileHash: string;
       toolCallsCount: number;
       extractedFactsCount: number;
+      banditArmId?: string;
+      banditArmIndex?: number;
+      turnMetrics?: TurnMetrics;
     };
 
 export function evalLogPath(dataDir: string): string {
