@@ -3,6 +3,7 @@ import process from "node:process";
 import { ToolManualManager } from "./managers";
 import { LanguageModel, ParsedResponse } from "./model";
 import { logError, logInfo, logWarn } from "../shared/logging";
+import { CoAdaptSession } from "../coadapt";
 
 const SERVER_URL = "http://127.0.0.1:8000/orchestrate";
 
@@ -22,12 +23,18 @@ export class CLIClient {
   private tool_manager = new ToolManualManager();
   private language_model: LanguageModel;
   private test_flag: boolean;
+  private co_adapt: CoAdaptSession | null;
 
-  constructor(opts?: { model_type?: string; model_name?: string; test_flag?: boolean }) {
+  constructor(opts?: { model_type?: string; model_name?: string; test_flag?: boolean; co_adapt?: boolean }) {
     const model_type = opts?.model_type ?? "google";
     const model_name = opts?.model_name;
     this.test_flag = !!opts?.test_flag;
     this.language_model = new LanguageModel(model_type, model_name);
+    const enable =
+      opts?.co_adapt !== false &&
+      process.env.COADAPT !== "0" &&
+      process.env.COADAPT_DISABLED !== "1";
+    this.co_adapt = enable ? new CoAdaptSession() : null;
   }
 
   async agent_loop(): Promise<void> {
@@ -38,27 +45,47 @@ export class CLIClient {
       const user_input = await question("--- User Input ---\nEnter your message for the agent (or 'quit' to exit):\n");
       if (user_input.trim().toLowerCase() === "quit") break;
 
+      if (this.co_adapt) this.co_adapt.onUserTurnStart(user_input);
       this.language_model.add_user_message(user_input);
       process.stdout.write("\n--- Agent Response ---\n");
 
+      const setCoAdapt = async () => {
+        if (!this.co_adapt) {
+          this.language_model.set_co_adapt_context("");
+          return;
+        }
+        this.language_model.set_co_adapt_context(await this.co_adapt.buildContextBlock(user_input));
+      };
+      await setCoAdapt();
+
+      let turn_assistant = "";
       let llm_output: ParsedResponse = this.language_model.parse_response(
         await this.language_model.generate_response(this.tool_manager.getToolInfo())
       );
 
       if (this.test_flag) process.stdout.write(`LLM Output (with tool calls):\n${JSON.stringify(llm_output, null, 2)}\n\n`);
 
-      if (llm_output.content) process.stdout.write(`${llm_output.content}\n\n`);
+      if (llm_output.content) {
+        process.stdout.write(`${llm_output.content}\n\n`);
+        turn_assistant += `${llm_output.content}\n`;
+      }
 
       let tool_calls: ToolCall[] = (llm_output.tool_calls as any) ?? [];
       while (tool_calls.length > 0) {
         await this.tool_callings(tool_calls);
+        await setCoAdapt();
         llm_output = this.language_model.parse_response(
           await this.language_model.generate_response(this.tool_manager.getToolInfo())
         );
         if (this.test_flag) process.stdout.write(`LLM Output (with tool calls):\n${JSON.stringify(llm_output, null, 2)}\n\n`);
-        if (llm_output.content) process.stdout.write(`${llm_output.content}\n\n`);
+        if (llm_output.content) {
+          process.stdout.write(`${llm_output.content}\n\n`);
+          turn_assistant += `${llm_output.content}\n`;
+        }
         tool_calls = (llm_output.tool_calls as any) ?? [];
       }
+
+      if (this.co_adapt) await this.co_adapt.afterTurn(user_input, turn_assistant.trim());
     }
 
     rl.close();

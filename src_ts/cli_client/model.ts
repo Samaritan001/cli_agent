@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
@@ -35,10 +34,7 @@ function normalizeProvider(modelType: string): Provider {
 }
 
 function hereDir(): string {
-  // Works both in tsx (src_ts) and compiled dist
-  const isEsm = typeof (import.meta as any)?.url === "string";
-  if (isEsm) return path.dirname(fileURLToPath((import.meta as any).url));
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  // CommonJS `__dirname` matches both `tsx src_ts/...` and `node dist/...` layouts.
   return __dirname;
 }
 
@@ -48,6 +44,8 @@ export class LanguageModel {
   model_name: string;
   system_instruction: string;
   tool_definitions: any;
+  /** Appended to system prompt each turn (profiles + memory); Phase 1 co-adaptation. */
+  private co_adapt_context = "";
 
   private openaiClient?: OpenAI;
   private anthropicClient?: Anthropic;
@@ -88,6 +86,16 @@ export class LanguageModel {
     this.system_instruction = instruction;
   }
 
+  /** Set co-adaptation block (profiles + retrieved memory). Pass empty string to clear. */
+  set_co_adapt_context(content: string) {
+    this.co_adapt_context = content ?? "";
+  }
+
+  private system_with_co_adapt(): string {
+    if (!this.co_adapt_context.trim()) return this.system_instruction;
+    return `${this.system_instruction}\n\n---\nCo-adaptation context (memory + profiles):\n${this.co_adapt_context}`;
+  }
+
   add_user_message(content: string) {
     if (this.model_type === "openai") this.history.push({ role: "user", content });
     else if (this.model_type === "anthropic")
@@ -119,7 +127,7 @@ export class LanguageModel {
   }
 
   private to_openai(tool_info: ToolInfo) {
-    const msgs: any[] = [{ role: "system", content: this.system_instruction }, ...this.history];
+    const msgs: any[] = [{ role: "system", content: this.system_with_co_adapt() }, ...this.history];
     if (!tool_info.tool_summaries) msgs.push({ role: "system", content: "No tools currently available." });
     else {
       msgs.push({ role: "system", content: `Available tools summaries:\n${tool_info.tool_summaries}` });
@@ -131,7 +139,7 @@ export class LanguageModel {
   }
 
   private to_anthropic(tool_info: ToolInfo): { system: string; messages: any[] } {
-    let system = this.system_instruction + "\n";
+    let system = this.system_with_co_adapt() + "\n";
     const messages = [...this.history];
     if (!tool_info.tool_summaries) system += "No tools currently available.\n";
     else {
@@ -142,7 +150,7 @@ export class LanguageModel {
   }
 
   private to_google(tool_info: ToolInfo): { system: string; contents: any[] } {
-    let system = this.system_instruction + "\n";
+    let system = this.system_with_co_adapt() + "\n";
     const contents = [...this.history];
     if (!tool_info.tool_summaries) system += "No tools currently available.\n";
     else {

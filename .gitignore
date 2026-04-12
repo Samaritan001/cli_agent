@@ -11,3 +11,6 @@ wheels/
 **/__pycache__/
 .env
 node_modules/
+
+# Co-adaptation Phase 1 local state (profiles, memory, logs)
+.cli_agent/
