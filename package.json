@@ -5,11 +5,14 @@
   "type": "commonjs",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-cli-assets.mjs",
     "start:orchestrator": "node dist/orchestrator.js",
     "start:cli": "node dist/cli_client/cli_client.js",
-    "dev:orchestrator": "tsx src_ts/orchestrator.ts",
-    "dev:cli": "tsx src_ts/cli_client/cli_client.ts",
+    "dev:orchestrator": "tsc -p tsconfig.json && node dist/orchestrator.js",
+    "dev:cli": "tsc -p tsconfig.json && node scripts/copy-cli-assets.mjs && node dist/cli_client/cli_client.js",
+    "dev:orchestrator:tsx": "tsx src_ts/orchestrator.ts",
+    "dev:cli:tsx": "tsx src_ts/cli_client/cli_client.ts",
+    "generate:skill-server": "tsx src_ts/cli_server/skill_server_generator.ts",
     "lint": "eslint .",
     "test": "vitest run",
     "build:weather-image": "docker build -t weather-server:test -f src_ts/cli_server/weather_ts_server/Dockerfile ."
@@ -27,6 +30,7 @@
     "@types/dockerode": "^4.0.1",
     "@types/node": "^24.0.0",
     "eslint": "^9.10.0",
+    "get-tsconfig": "^4.13.7",
     "tsx": "^4.20.2",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"

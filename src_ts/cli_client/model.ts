@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
@@ -35,10 +34,7 @@ function normalizeProvider(modelType: string): Provider {
 }
 
 function hereDir(): string {
-  // Works both in tsx (src_ts) and compiled dist
-  const isEsm = typeof (import.meta as any)?.url === "string";
-  if (isEsm) return path.dirname(fileURLToPath((import.meta as any).url));
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  // Compiled output lives in dist/cli_client; assets are copied there by npm run build.
   return __dirname;
 }
 
