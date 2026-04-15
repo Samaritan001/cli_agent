@@ -30,20 +30,6 @@ def build_and_save_image(image_name, tag, source_path, save_path):
 
         logger.info(f"Successfully built {image.tags}")
 
-        # 2. Save the image to a local folder
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
-            
-        file_name = f"{image_name}_{tag}.tar"
-        full_path = os.path.join(save_path, file_name)
-        
-        logger.info(f"Saving image to {full_path}...")
-        with open(full_path, 'wb') as f:
-            for chunk in image.save():
-                f.write(chunk)
-                
-        logger.info("Image saved successfully.")
-
     except Exception as e:
         logger.info(f"An error occurred: {e}")
 
