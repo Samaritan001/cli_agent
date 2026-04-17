@@ -1,10 +1,21 @@
-import uuid
-from datetime import datetime
-from dataclasses import dataclass, field
+import math
+import secrets
+from collections import defaultdict
+from datetime import datetime, timezone
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Set
+
+import faiss
 import numpy as np
 from fastembed import TextEmbedding
-import faiss
-from typing import List, Dict, Set, Any
+
+from memory_llm import MemoryLLMBackend, NullMemoryLLM
+
+
+def _stable_int_id() -> int:
+    """Return a positive int64-friendly id for FAISS (avoid 128-bit uuid overflow)."""
+    return secrets.randbits(63) or 1
+
 
 @dataclass
 class MemoryNode:
@@ -13,14 +24,15 @@ class MemoryNode:
     fact_type: str  # 'world' or 'experience'
     timestamp: datetime
     embedding: np.ndarray
-    entities: Dict[str, int] # {entity_name: frequency}
+    entities: Dict[str, int]  # {entity_name: frequency}
     doc_length: int
-    causes: Dict[int, int] # {cause_node_id: causality_level}
-    effects: Dict[int, int] # {effect_node_id: causality_level}
+    causes: Dict[int, int]  # {cause_node_id: causality_level}
+    effects: Dict[int, int]  # {effect_node_id: causality_level}
+
 
 class MemoryEngine:
-    def __init__(self):
-        # CORE STORAGE: 
+    def __init__(self, llm: Optional[MemoryLLMBackend] = None):
+        # CORE STORAGE:
         self.nodes: Dict[int, MemoryNode] = {}
 
         # --- LINK DATA STRUCTURES ---
@@ -44,11 +56,10 @@ class MemoryEngine:
         # Stored within MemoryNode
         self.cause_window = 3  # Number of recent nodes to consider for cause-effect linking
 
-        
         # --- RECALL PARAMETERS ---
         # 1. Semantic Search Parameters
         self.semantic_K = 5  # Number of semantic neighbors to retrieve
-
+        
         # 2. Entity Search Parameters
         self.k1 = 1.5  # BM25 parameter
         self.b = 0.75  # BM25 parameter
@@ -73,50 +84,56 @@ class MemoryEngine:
         # 8. Token Limit for Recalled Memory Context
         self.memory_token_limit = 1000  # Max total tokens for recalled nodes (for LLM input)
 
+        # 9. LLM Backend
+        self.llm: MemoryLLMBackend = llm if llm is not None else NullMemoryLLM()
 
     def remember(self, context: str):
         """
         STAGE 1: REMEMBER
         Extracts facts and updates graph indices.
         """
-        
-        node_id = int(uuid.uuid4())
-        
-        embedding = np.array([self.embedding_model.embed([context])]).astype('float32')
-        self.semantic_index.add_with_ids(embedding, np.array([node_id]))
+        node_id = _stable_int_id()
+
+        raw = list(self.embedding_model.embed([context]))
+        embedding = np.asarray(raw, dtype=np.float32)
+        if embedding.ndim == 1:
+            embedding = embedding.reshape(1, -1)
+
+        self.semantic_index.add_with_ids(embedding, np.array([node_id], dtype=np.int64))
 
         # TODO: Extract entities using LLM
         entities = self.extract_entities(context)
         for entity in entities:
-            if entity not in self.entity_index:
-                self.entity_index[entity] = []
-            self.entity_index[entity].append(node_id)
+            self.entity_index.setdefault(entity, []).append(node_id)
         context_tokens = context.lower().split()
         entity_counts = {entity: context_tokens.count(entity.lower()) for entity in entities}
 
-        # TODO: Identify cause-effect relationships using LLM
-        causes = self.identify_causes(context, self.temporal_stream[-self.cause_window:])
-        for cause, level in causes.items():
-            if cause in self.nodes:
-                self.nodes[cause].effects[node_id] = level
-
+        # TODO: Identify causes using LLM
+        window_ids = self.temporal_stream[-self.cause_window :]
+        causes = self.identify_causes(context, window_ids)
+        for cause_id, level in causes.items():
+            if cause_id in self.nodes:
+                self.nodes[cause_id].effects[node_id] = level
+        
         # Insert new memory node
+        now = datetime.now(timezone.utc)
         new_node = MemoryNode(
             id=node_id,
             text=context,
             fact_type="experience",
-            timestamp=datetime.now(),
+            timestamp=now,
             embedding=embedding,
             doc_length=len(context_tokens),
             entities=entity_counts,
             causes=causes,
-            effects={}
+            effects={},
         )
 
         # Store node and update Temporal Stream
         self.nodes[node_id] = new_node
         self.temporal_stream.append(node_id)
-        self.avg_dl = (self.avg_dl * len(self.nodes) + len(context_tokens)) / (len(self.nodes) + 1)
+        n = len(self.nodes)
+        self.avg_dl = (self.avg_dl * (n - 1) + len(context_tokens)) / max(n, 1)
 
         return node_id
 
@@ -126,67 +143,89 @@ class MemoryEngine:
         Multi-channel retrieval: Semantic, Entity, and Graph Traversal.
         """
         # 1. Semantic Search (O(log n) with HNSW)
-        query_embedding = self.embedding_model.embed([query]).astype('float32')
+        if not self.nodes:
+            return ""
+
+        raw_q = list(self.embedding_model.embed([query]))
+        query_embedding = np.asarray(raw_q, dtype=np.float32)
+        if query_embedding.ndim == 1:
+            query_embedding = query_embedding.reshape(1, -1)
+
         distances, ids = self.semantic_index.search(query_embedding, self.semantic_K)
-        semantic_candidates = ids[0].tolist()
-        # candidate_ids.update({str(id): float(distance) for id, distance in zip(ids[0].tolist(), distances[0].tolist())})
+        semantic_candidates = [int(i) for i in ids[0].tolist() if int(i) >= 0]
 
         # 2. Entity Lookup (O(1) via Hash Map)
         entity_candidates = self.entity_bm25(query)
 
         # 3. Cause-Effect Spreading (Graph Traversal)
-        cause_effect_candidates = {}
-        seed_ids = set(semantic_candidates) | set(entity_candidates)
+        merged_cause_effect: Dict[int, int] = {}
+        seed_ids: Set[int] = set(semantic_candidates) | set(entity_candidates)
         for cid in seed_ids:
             # update considers overlapping nodes
-            cause_effect_candidates.update(self.nodes[cid].causes)
-            cause_effect_candidates.update(self.nodes[cid].effects)
-        cause_effect_candidates = sorted(cause_effect_candidates, key=cause_effect_candidates.get, reverse=True)[:self.cause_effect_K]
+            node = self.nodes.get(cid)
+            if node is None:
+                continue
+            for nbr_id, lvl in node.causes.items():
+                merged_cause_effect[nbr_id] = max(merged_cause_effect.get(nbr_id, 0), lvl)
+            for nbr_id, lvl in node.effects.items():
+                merged_cause_effect[nbr_id] = max(merged_cause_effect.get(nbr_id, 0), lvl)
 
-        # 4. Fusion of semantic, entity, and causal nodes using Reciprocal Rank Fusion (RRF)
-        rrf_results = self.rrf({"semantic": semantic_candidates, "entity": entity_candidates, "cause": cause_effect_candidates})
+        # Top-K cause/effect neighbors by merged causal strength (feeds the "cause" RRF list).
+        cause_effect_candidates = sorted(
+            merged_cause_effect.keys(),
+            key=lambda x: merged_cause_effect[x],
+            reverse=True,
+        )[: self.cause_effect_K]
 
-        # 5. Temporal Recency (Simple slice of the stream)
+        # 4. Fusion: merge semantic, entity, and cause lists via Reciprocal Rank Fusion (RRF).
         # TODO: match a certain time range
+        rrf_results = self.rrf(
+            {"semantic": semantic_candidates, "entity": entity_candidates, "cause": cause_effect_candidates}
+        )
+        if not rrf_results:
+            return ""
+
+        # 5. Temporal recency: decay fused scores by age (hours since node timestamp).
         scored_candidates = self.temporal_boost(rrf_results)
-        
-        # 6. TODO: Neuro Reranking with LLM
-        ranked_cadidates = self.neural_rerank(list(scored_candidates.keys()), query)
+        # 6. Neural reranking: reorder candidates (LLM backend; identity if using NullMemoryLLM).
+        ranked_candidates = self.neural_rerank(list(scored_candidates.keys()), query)
 
-        # 7. Add recent memory nodes directly
+        # 7. Final ordering: prepend recent stream, then fill remainder from reranked list (deduped later).
+        w = self.direct_temporal_window
+        rank_budget = max(0, self.max_recall - w)
         # TODO: Prune using score threshold
-        final_ids = self.temporal_stream[-self.direct_temporal_window:] + ranked_cadidates[:self.max_recall - self.direct_temporal_window]
+        final_ids = self.temporal_stream[-w:] + ranked_candidates[:rank_budget]
 
-        # 8. Convert recalled nodes to a context string for LLM input
+        # 8. Render context string: walk ids in order, skip duplicates, stop at token budget.
         memory_context = ""
         token_count = 0
-        examined_ids = set()  # To avoid duplicates
-        for node_id in final_ids:
-            if node_id in examined_ids:
+        examined_ids: Set[int] = set()
+        for nid in final_ids:
+            if nid in examined_ids:
                 continue
-            examined_ids.add(node_id)
-            node = self.nodes[node_id]
-            # Token-limit assessment and pruning
+            examined_ids.add(nid)
+            node = self.nodes.get(nid)
+            if node is None:
+                continue
             if token_count + node.doc_length > self.memory_token_limit:
                 break
             token_count += node.doc_length
-            memory_context += f"{node.text}\n{'-'*10}\n"
+            memory_context += f"{node.text}\n{'-' * 10}\n"
 
         return memory_context
 
-
-    def reflect(self, node_ids: List[str]) -> str:
+    def reflect(self, node_ids: List[int]) -> str:
         """
         STAGE 3: REFLECT
         Synthesizes raw nodes into an "Observation" or "Mental Model".
         In a real system, this sends the nodes to an LLM to resolve contradictions.
         """
-        facts = [self.nodes[nid].text for nid in node_ids]
         # TODO: design a better consolidation algorithm or AI handling
         # TODO: prune out-dated or low-confidence memory nodes
-        summary = f"Synthesized Knowledge: {'; '.join(facts)}"
-        
         # Store this as a new 'observation' fact type node
+        facts = [self.nodes[nid].text for nid in node_ids if nid in self.nodes]
+        summary = self.llm.reflect_synthesize(facts)
+
         obs_id = self.remember(summary)
         self.nodes[obs_id].fact_type = "observation"
         return summary
@@ -196,90 +235,90 @@ class MemoryEngine:
 
     # TODO: Function (extractEntities): Extract entities from context using LLM
     def extract_entities(self, context: str) -> List[str]:
-        # Placeholder for entity extraction logic using LLM
-        current_entities = list(self.entity_index.keys())
-        return []
+        return self.llm.extract_entities(context)
 
     # TODO: Function (identifyCauses): Identify cause-effect relationships using LLM
     def identify_causes(self, context: str, memory_window: List[int]) -> Dict[int, int]:
         # Placeholder for cause relationship identification logic using LLM
         # TODO: Need to define the level of causality (e.g. 0-5) and ask LLM to identify
-        return {} # {cause_node_id: causality_level}
-    
-    def entity_bm25(self, query: str) -> List[str]:
+        return self.llm.identify_causes(context, memory_window)
+
+    def entity_bm25(self, query: str) -> List[int]:
         query_entities = self.extract_entities(query)
 
-        scores: Dict[str, float] = {}
+        scores: Dict[int, float] = defaultdict(float)
         N = len(self.nodes)
+        if N == 0:
+            return []
+
+        avg_dl = max(self.avg_dl, 1e-6)
 
         for entity in query_entities:
-            # 1. Calculate IDF for this token
+            # STEP 1: Calculate IDF for this token
             n_q = len(self.entity_index.get(entity, []))
-            if n_q == 0: continue
+            if n_q == 0:
+                continue
             idf = math.log((N - n_q + 0.5) / (n_q + 0.5) + 1.0)
             
-            # 2. Score each candidate containing this token
+            # STEP 2. Score each candidate containing this token
             for node_id in self.entity_index[entity]:
                 node = self.nodes[node_id]
-                f_q = node.entities.get(entity, 0) # Simple term frequency
-                
-                # BM25 Formula components
+                f_q = node.entities.get(entity, 0)
                 L_d = node.doc_length
                 numerator = f_q * (self.k1 + 1)
-                denominator = f_q + self.k1 * (1 - self.b + self.b * (L_d / self.avg_dl))
-                
+                denominator = f_q + self.k1 * (1 - self.b + self.b * (L_d / avg_dl))
                 scores[node_id] += idf * (numerator / denominator)
 
         # STEP 3: Rank and return top-k
-        sorted_ids = sorted(scores, key=scores.get, reverse=True)
-        return sorted_ids[:self.entity_K]
+        sorted_ids = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)
+        return sorted_ids[: self.entity_K]
 
-    def rrf(self, ranked_lists: Dict[str, List[str]]) -> Dict[int, float]:
+    def rrf(self, ranked_lists: Dict[str, List[int]]) -> Dict[int, float]:
         """
-        Implements Reciprocal Rank Fusion (RRF) to merge multiple retrieval channels.
+        Reciprocal Rank Fusion (RRF) to merge multiple retrieval channels.
         """
-        rrf_scores = {}
+        rrf_scores: Dict[int, float] = defaultdict(float)
         for category, r_list in ranked_lists.items():
             for rank, node_id in enumerate(r_list):
-                # RRF Formula: 1 / (k + rank)
                 score = 1.0 / (self.k_rrf + rank + 1)
-                rrf_scores[node_id] += score * self.logical_weights.get(category, 1) # Apply logical weight for this category
-        return rrf_scores
+                rrf_scores[node_id] += score * self.logical_weights.get(category, 1)
+        return dict(rrf_scores)
 
-    def temporal_boost(self, rrf_results: Dict[str, float]) -> Dict[int, float]:
+    def temporal_boost(self, rrf_results: Dict[int, float]) -> Dict[int, float]:
         """
         Applies recency and temporal boosts to the fused RRF results.
         """
-        final_results = {}
+        final_results: Dict[int, float] = {}
         now = datetime.now(timezone.utc)
 
         for node_id, rrf_score in rrf_results.items():
-            # Recency Boost: Exponential decay based on hours since creation
-            hours_old = (now - node.timestamp).total_seconds() / 3600
-            recency_boost = np.exp(-self.temporal_decay_lambda * hours_old) # Simulated decay
+            node = self.nodes.get(node_id)
+            if node is None:
+                continue
+            ts = node.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            # Recency Boost: exponential decay based on hours since creation
+            hours_old = (now - ts).total_seconds() / 3600.0
+            recency_boost = float(np.exp(-self.temporal_decay_lambda * hours_old))
             
-            # Final combined weight
-            combined_weight = rrf_score * recency_boost
-            
-            final_results[node_id] = combined_weight
-            
+            # Apply Recency Boost to RRF Score
+            final_results[node_id] = rrf_score * recency_boost
+
         return final_results
     
     # TODO: Neural Reranking using LLM
     def neural_rerank(self, candidate_ids: List[int], query: str) -> List[int]:
-        # Placeholder for neural reranking logic using LLM
-        return candidate_ids
+        return self.llm.neural_rerank(candidate_ids, query)
 
 
-
-# Example Usage
-engine = MemoryEngine()
-
-# Remembering facts
-id1 = engine.remember("User is a student at UCLA", entities=["User", "UCLA"])
-id2 = engine.remember("User received a parking ticket in Westwood", entities=["Westwood"], cause_of=id1)
-
-# Recalling facts
-memories = engine.recall("Tell me about the user's location", target_entities=["UCLA"])
-for m in memories:
-    print(f"Recalled: {m.id} : {m.timestamp} : {m.text} ({m.fact_type})")
+# Example usage (module import does not run side effects)
+if __name__ == "__main__":
+    engine = MemoryEngine()
+    id1 = engine.remember("User is a student at UCLA")
+    id2 = engine.remember("User received a parking ticket in Westwood")
+    out = engine.recall("Tell me about the user's location")
+    print(out)
+    for nid in (id1, id2):
+        n = engine.nodes[nid]
+        print(f"{n.id}: {n.timestamp} : {n.text} ({n.fact_type})")
