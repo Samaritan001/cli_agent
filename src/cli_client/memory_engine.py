@@ -9,7 +9,7 @@ import faiss
 import numpy as np
 from fastembed import TextEmbedding
 
-from memory_llm import MemoryLLMBackend, NullMemoryLLM
+from memory_llm import MemoryLLMBackend, NullMemoryLLM, build_memory_llm_from_env
 
 
 def _stable_int_id() -> int:
@@ -86,6 +86,11 @@ class MemoryEngine:
 
         # 9. LLM Backend
         self.llm: MemoryLLMBackend = llm if llm is not None else NullMemoryLLM()
+
+    @classmethod
+    def from_env(cls) -> "MemoryEngine":
+        """Construct engine with ``build_memory_llm_from_env()`` (feature flags + provider config)."""
+        return cls(llm=build_memory_llm_from_env())
 
     def remember(self, context: str):
         """
