@@ -14,8 +14,10 @@ Environment (optional; all features default off — enable explicitly):
 
 API keys use the same vars as the main client: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY.
 
-Use build_memory_llm_from_env() or MemoryLLMClient.from_env() to construct a flagged wrapper
-around a backend (still NullMemoryLLM until provider-specific calls are implemented).
+- MEMORY_LLM_MAX_ENTITIES: max strings returned per call (default 5, clamped 1–50)
+
+Use build_memory_llm_from_env() or MemoryLLMClient.from_env() to construct a flagged wrapper;
+when provider + API key are set, ProviderMemoryLLM handles extract_entities (see memory_llm_provider).
 """
 from __future__ import annotations
 
@@ -55,6 +57,7 @@ class MemoryLLMConfig:
     model_name: Optional[str]
     features: MemoryLLMFeatures
     api_key: Optional[str]
+    max_entities: int = 5
 
 
 def load_memory_llm_config_from_env() -> MemoryLLMConfig:
@@ -85,12 +88,27 @@ def load_memory_llm_config_from_env() -> MemoryLLMConfig:
     if api_key is not None and api_key.strip() == "":
         api_key = None
 
+    try:
+        max_entities = int(os.getenv("MEMORY_LLM_MAX_ENTITIES", "5"))
+    except ValueError:
+        max_entities = 5
+    max_entities = max(1, min(50, max_entities))
+
     return MemoryLLMConfig(
         provider=provider,
         model_name=model_name,
         features=features,
         api_key=api_key,
+        max_entities=max_entities,
     )
+
+
+def _default_inner_backend(cfg: MemoryLLMConfig) -> "MemoryLLMBackend":
+    if cfg.provider != "none" and cfg.api_key:
+        from memory_llm_provider import ProviderMemoryLLM
+
+        return ProviderMemoryLLM(cfg)
+    return NullMemoryLLM()
 
 
 @runtime_checkable
@@ -144,7 +162,9 @@ class MemoryLLMClient:
 
     @classmethod
     def from_env(cls, inner: Optional[MemoryLLMBackend] = None) -> "MemoryLLMClient":
-        return cls(load_memory_llm_config_from_env(), inner=inner)
+        cfg = load_memory_llm_config_from_env()
+        resolved = inner if inner is not None else _default_inner_backend(cfg)
+        return cls(cfg, inner=resolved)
 
     def extract_entities(self, text: str) -> List[str]:
         if not self.config.features.extract_entities:
@@ -168,5 +188,7 @@ class MemoryLLMClient:
 
 
 def build_memory_llm_from_env(inner: Optional[MemoryLLMBackend] = None) -> MemoryLLMBackend:
-    """Factory: env-backed MemoryLLMClient wrapping ``inner`` (default NullMemoryLLM)."""
-    return MemoryLLMClient.from_env(inner=inner)
+    """Factory: env-backed MemoryLLMClient; picks ProviderMemoryLLM when provider + key are set."""
+    cfg = load_memory_llm_config_from_env()
+    resolved = inner if inner is not None else _default_inner_backend(cfg)
+    return MemoryLLMClient(cfg, inner=resolved)
