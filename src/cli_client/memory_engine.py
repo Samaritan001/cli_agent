@@ -9,19 +9,30 @@ import faiss
 import numpy as np
 from fastembed import TextEmbedding
 
-from memory_llm import MemoryLLMBackend, NullMemoryLLM, build_memory_llm_from_env
+# from memory_llm import MemoryLLMBackend, NullMemoryLLM, build_memory_llm_from_env
+from model import MemoryLanguageModel
 
 
 def _stable_int_id() -> int:
     """Return a positive int64-friendly id for FAISS (avoid 128-bit uuid overflow)."""
     return secrets.randbits(63) or 1
 
+def _strip_json_fence(raw: str) -> str:
+    s = raw.strip()
+    if s.startswith("```"):
+        lines = s.split("\n")
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        s = "\n".join(lines)
+    return s.strip()
 
 @dataclass
 class MemoryNode:
     id: int
     text: str
-    fact_type: str  # 'world' or 'experience'
+    fact_type: str  # "EXPERIENCE", "OBSERVATION"
     timestamp: datetime
     embedding: np.ndarray
     entities: Dict[str, int]  # {entity_name: frequency}
@@ -31,9 +42,12 @@ class MemoryNode:
 
 
 class MemoryEngine:
-    def __init__(self, llm: Optional[MemoryLLMBackend] = None):
-        # CORE STORAGE:
+    def __init__(self):
+        # CORE STORAGE
         self.nodes: Dict[int, MemoryNode] = {}
+        
+        # LLM Backend
+        self.llm = MemoryLanguageModel()
 
         # --- LINK DATA STRUCTURES ---
         
@@ -84,14 +98,6 @@ class MemoryEngine:
         # 8. Token Limit for Recalled Memory Context
         self.memory_token_limit = 1000  # Max total tokens for recalled nodes (for LLM input)
 
-        # 9. LLM Backend
-        self.llm: MemoryLLMBackend = llm if llm is not None else NullMemoryLLM()
-
-    @classmethod
-    def from_env(cls) -> "MemoryEngine":
-        """Construct engine with ``build_memory_llm_from_env()`` (feature flags + provider config)."""
-        return cls(llm=build_memory_llm_from_env())
-
     def remember(self, context: str):
         """
         STAGE 1: REMEMBER
@@ -125,7 +131,7 @@ class MemoryEngine:
         new_node = MemoryNode(
             id=node_id,
             text=context,
-            fact_type="experience",
+            fact_type="EXPERIENCE",
             timestamp=now,
             embedding=embedding,
             doc_length=len(context_tokens),
@@ -215,7 +221,7 @@ class MemoryEngine:
             if token_count + node.doc_length > self.memory_token_limit:
                 break
             token_count += node.doc_length
-            memory_context += f"{node.text}\n{'-' * 10}\n"
+            memory_context += f"{node.fact_type}\n{node.text}\n{'-' * 10}\n"
 
         return memory_context
 
@@ -232,7 +238,7 @@ class MemoryEngine:
         summary = self.llm.reflect_synthesize(facts)
 
         obs_id = self.remember(summary)
-        self.nodes[obs_id].fact_type = "observation"
+        self.nodes[obs_id].fact_type = "OBSERVATION"
         return summary
     
     # TODO: Function: Convert history to context string
@@ -240,7 +246,13 @@ class MemoryEngine:
 
     # TODO: Function (extractEntities): Extract entities from context using LLM
     def extract_entities(self, context: str) -> List[str]:
-        return self.llm.extract_entities(context)
+        result = self.llm.extract_entities(context, self.entity_N)
+        content = result.get("content", "")
+        content = json.loads(_strip_json_fence(content))
+        if isinstance(content, dict) and "entities" in content:
+            return content["entities"]
+        logger.warning("memory_llm extract_entities failed: %s", content)
+        return []
 
     # TODO: Function (identifyCauses): Identify cause-effect relationships using LLM
     def identify_causes(self, context: str, memory_window: List[int]) -> Dict[int, int]:

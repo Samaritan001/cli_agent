@@ -9,7 +9,7 @@ import logging
 from typing import List, Dict, Any
 
 from managers import ToolManualManager
-from model import LanguageModel, MockLanguageModel
+from model import ClientLanguageModel
 
 LOG_FORMAT = "\033[32m%(levelname)s\033[0m:    %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -36,50 +36,12 @@ SERVER_URL = "http://127.0.0.1:8000/orchestrate"
 #     return cleaned
 
 class CLIClient:
-    def __init__(self, model_type="google", model_name=None, mock_flag=False, test_flag=False):
-        self.mock_flag = mock_flag
+    def __init__(self, model_type="google", model_name=None, test_flag=False):
         self.test_flag = test_flag
         self.tool_manager = ToolManualManager()
-        if mock_flag:
-            logger.info("Initializing CLIClient in MOCK MODE with MockLanguageModel.")
-            self.language_model = MockLanguageModel(model_type=model_type, model_name=model_name)
-        else:
-            self.language_model = LanguageModel(model_type=model_type, model_name=model_name)
+        self.language_model = ClientLanguageModel(model_type=model_type, model_name=model_name)
 
-    async def agent_loop(self):
-        if self.mock_flag:
-            logger.warning("Running agent loop in MOCK MODE.")
-            print("--- User Input ---\nEnter your message for the agent (or 'quit' to exit):\n")
-            user_input = "What is the weather like in xxx?"
-            print(user_input)
-            self.language_model.add_user_message(user_input)
-            print(f"\n--- Agent Response ---")
-            for i in range(5):
-                llm_output = self.language_model.parse_response(self.language_model.generate_response(self.tool_manager.get_tool_info(), with_tool_calls=i))
-                content = llm_output.get("content", "")
-                if content != "":
-                    print(f"{content}\n")
-                tool_calls = llm_output.get("tool_calls", None)
-                await self.tool_callings(tool_calls)
-            print("--- User Input ---")
-            user_input = "quit"
-            print("Full conversation history:")
-            print(f"System Instructions:\n{self.language_model.system_instruction}")
-            print("\nMessage History:")
-            for msg in self.language_model.history:
-                print(f"{msg['role']}: {msg.get('content', msg.get('parts'))}\n")
-            print("Tool Instructions:\n")
-            tool_info = self.tool_manager.get_tool_info()
-            if tool_info["tool_summaries"] == "":
-                print("No tool summaries registered.")
-            else:
-                print(f"Available tools summaries:\n{tool_info['tool_summaries']}")
-                if tool_info["tool_manuals"] != "":
-                    print(f"Active tools full manuals:\n{tool_info['tool_manuals']}")
-            logger.warning("Exiting agent loop in MOCK MODE.")
-            
-            return
-                
+    async def agent_loop(self):                
         while True:
             user_input = input("--- User Input ---\nEnter your message for the agent (or 'quit' to exit):\n")
             if user_input.lower() == "quit":
@@ -213,7 +175,7 @@ def generate_stop_command(server_name):
 
 # Example usage
 if __name__ == "__main__":
-    cli_client = CLIClient(model_type="openai", mock_flag=False, test_flag=True)
+    cli_client = CLIClient(model_type="openai", test_flag=True)
     asyncio.run(cli_client.agent_loop())
 
 
