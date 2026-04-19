@@ -10,7 +10,7 @@ import numpy as np
 from fastembed import TextEmbedding
 
 # from memory_llm import MemoryLLMBackend, NullMemoryLLM, build_memory_llm_from_env
-from model import MemoryLanguageModel
+from model import MemoryLanguageModel, SideRequestConfig, llm_side_request
 
 
 def _stable_int_id() -> int:
@@ -112,14 +112,14 @@ class MemoryEngine:
 
         self.semantic_index.add_with_ids(embedding, np.array([node_id], dtype=np.int64))
 
-        # TODO: Extract entities using LLM
+        # Extract entities using LLM
         entities = self.extract_entities(context)
         for entity in entities:
             self.entity_index.setdefault(entity, []).append(node_id)
         context_tokens = context.lower().split()
         entity_counts = {entity: context_tokens.count(entity.lower()) for entity in entities}
 
-        # TODO: Identify causes using LLM
+        # Identify causes using LLM
         window_ids = self.temporal_stream[-self.cause_window :]
         causes = self.identify_causes(context, window_ids)
         for cause_id, level in causes.items():
@@ -241,12 +241,16 @@ class MemoryEngine:
         self.nodes[obs_id].fact_type = "OBSERVATION"
         return summary
     
-    # TODO: Function: Convert history to context string
-    # TODO: Function: Convert files, images, and other formats to text
+    # TODO: Outside the MemoryEngine:
+    # Convert history to context string
+    # Convert files, images, and other formats to text
 
-    # TODO: Function (extractEntities): Extract entities from context using LLM
+    # Extract entities from context using LLM
     def extract_entities(self, context: str) -> List[str]:
-        result = self.llm.extract_entities(context, self.entity_N)
+        # result = self.llm.extract_entities(context, self.entity_N)
+        system_prompt = _entities_system_prompt(self.entity_N)
+        result = llm_side_request(context, system_prompt)
+
         content = result.get("content", "")
         content = json.loads(_strip_json_fence(content))
         if isinstance(content, dict) and "entities" in content:
@@ -254,11 +258,53 @@ class MemoryEngine:
         logger.warning("memory_llm extract_entities failed: %s", content)
         return []
 
-    # TODO: Function (identifyCauses): Identify cause-effect relationships using LLM
-    def identify_causes(self, context: str, memory_window: List[int]) -> Dict[int, int]:
-        # Placeholder for cause relationship identification logic using LLM
-        # TODO: Need to define the level of causality (e.g. 0-5) and ask LLM to identify
-        return self.llm.identify_causes(context, memory_window)
+    
+    def _entities_system_prompt(max_entities: int) -> str:
+        return (
+            "You extract named entities for memory indexing. "
+            "Return ONLY valid JSON with this exact shape: "
+            '{"entities": ["Entity1", "Entity2"]}. '
+            f"Include at most {max_entities} entities. "
+            "Prefer people, organizations, locations, and key proper nouns; "
+            "use short surface forms as they appear in the text; "
+            "no duplicate meanings; use an empty array if there are none."
+        )
+
+    # Identify cause-effect relationships using LLM
+    def identify_causes(self, current_memory: str, memory_window: List[int]) -> Dict[int, int]:
+        past_memories = [{"memory_id": self.nodes[id].id, "memory_content": self.nodes[id].text} for id in memory_window]
+        memories = json.dumps(past_memories)
+        context = f"Past Memories:\n{memories}\n\nCurrent Memory:\n{current_memory}"
+        
+        # result = self.llm.identify_causes(context, len(memory_window))
+        
+        system_prompt = _causes_system_prompt(len(memory_window))
+        result = llm_side_request(context, system_prompt)
+        content = result.get("content", "")
+        content = json.loads(_strip_json_fence(content))
+        if isinstance(content, dict) and "causalities" in content:
+            return {item["memory_id"]: item["level"] for item in content["causalities"]}
+        logger.warning("memory_llm identify_causes failed: %s", content)
+        return {}
+
+    def _causes_system_prompt(max_causes: int) -> str:
+        return (
+            f"You are a Causal Logic Engine. Your task is to analyze the causal relationship "
+            f"between {max_causes} previous 'Source Memories' and one 'Current Memory'.\n\n"
+            "### CAUSALITY SCALE:\n"
+            "0: NO RELATION - The memories are independent or share only surface-level topics/entities.\n"
+            "1: WEAK/INDIRECT - The Source provides helpful background context but is not necessary for the Current memory.\n"
+            "2: STRONG/DIRECT - The Source is a clear precursor or contributor to the events in the Current memory.\n"
+            "3: CRITICAL/NECESSARY - The Current memory would not exist or cannot be understood without the Source.\n\n"
+            "### CONSTRAINTS:\n"
+            "- Ignore 'Entity Matching': Do not assign a level > 0 just because both memories mention the same person or place.\n"
+            "- Focus on 'Logical Flow': Does the Source memory explain *why* or *how* the Current memory occurred?\n"
+            f"- Output exactly {max_causes} entries in the JSON array.\n\n"
+            "### OUTPUT FORMAT:\n"
+            "Return ONLY valid JSON in this shape:\n"
+            '{"causalities": [{"memory_id": "string", "level": integer}]}'
+        )    
+
 
     def entity_bm25(self, query: str) -> List[int]:
         query_entities = self.extract_entities(query)
@@ -324,9 +370,44 @@ class MemoryEngine:
 
         return final_results
     
-    # TODO: Neural Reranking using LLM
+    # Neural Reranking using LLM
     def neural_rerank(self, candidate_ids: List[int], query: str) -> List[int]:
-        return self.llm.neural_rerank(candidate_ids, query)
+        past_memories = [{"memory_id": self.nodes[id].id, "memory_content": self.nodes[id].text} for id in candidate_ids]
+        memories = json.dumps(past_memories)
+        context = f"Past Memories:\n{memories}\n\nUser Query:\n{query}"
+        
+        # result = self.llm.neural_rerank(context, len(memory_window))
+        
+        system_prompt = _rerank_system_prompt(len(candidate_ids))
+        result = llm_side_request(context, system_prompt)
+        content = result.get("content", "")
+        content = json.loads(_strip_json_fence(content))
+        if isinstance(content, dict) and "ranks" in content:
+            ranks = content['ranks']
+            sorted_ranks = sorted(ranks, key=lambda x: x["rank"])
+            return [item["memory_id"] for item in sorted_ranks]
+        logger.warning("memory_llm neural_rerank failed: %s", content)
+        return []
+
+    def _rerank_system_prompt(num_memories: int) -> str:
+        return (
+            "You are a Semantic Relevance Auditor. Your task is to rank a set of memory nodes "
+            f"based on their utility in answering the following User Query: '{query}'\n\n"
+            "### RANKING CRITERIA:\n"
+            "1. DIRECT ANSWER: Does the memory contain the specific information requested?\n"
+            "2. CONTEXTUAL SUPPORT: Does the memory provide necessary background or 'why' for the query?\n"
+            "3. TEMPORAL RELEVANCE: If the query implies a sequence, is this memory a logical part of that timeline?\n"
+            "4. NOISE REDUCTION: If a memory is unrelated or only shares generic keywords, rank it lowest.\n\n"
+            "### CONSTRAINTS:\n"
+            f"- You must rank exactly {num_memories} memory nodes.\n"
+            f"- Assign a unique integer 'rank' from 1 to {num_memories}, where 1 is the MOST relevant and "
+            f"{num_memories} is the LEAST relevant.\n"
+            "- Do not allow ties; every memory must have a distinct rank.\n\n"
+            "### OUTPUT FORMAT:\n"
+            "Return ONLY valid JSON with this exact structure:\n"
+            '{"ranks": [{"memory_id": "string", "rank": integer}]}'
+        )
+
 
 
 # Example usage (module import does not run side effects)
