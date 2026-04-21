@@ -1,9 +1,11 @@
 import os
 from dotenv import load_dotenv
+import asyncio
 
+from typing import Dict, List, Optional, TYPE_CHECKING
 import json
-
 import logging
+from dataclasses import dataclass
 
 LOG_FORMAT = "\033[32m%(levelname)s\033[0m:    %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -12,6 +14,10 @@ logger = logging.getLogger("model")
 from openai import OpenAI          # v2.x+ (2026)
 from anthropic import Anthropic    # v1.x+ (2026)
 from google import genai           # New Google GenAI SDK (2026)
+
+if TYPE_CHECKING:
+    from memory_config import MemoryNode
+
 
 load_dotenv()
 
@@ -73,13 +79,13 @@ _Step by step, what was attempted, done? Very terse summary for each step_
 """
 
 @dataclass
-class SideRequestConfig:
+class LanguageModelConfig:
     model_type: str = "google"
     model_name: Optional[str] = None
     max_tokens: int = 512
 
-class LanguageModelBase:
-    def __init__(self, config=SideRequestConfig()):
+class BaseLanguageModel:
+    def __init__(self, config: Optional[LanguageModelConfig] = None):
         """
         Initializes the model wrapper.
         :param model_type: 'openai', 'anthropic', or 'google'
@@ -90,16 +96,16 @@ class LanguageModelBase:
         self.history = []
         self.system_instruction = ""
         
-        self.config = config
+        self.config = config or LanguageModelConfig()
         
         self.config.model_type = NAME_MAP.get(self.config.model_type.lower(), self.config.model_type)
         if self.config.model_type not in API_KEY_VARS:
-            raise ValueError(f"Unsupported model type: {model_type}")
+            raise ValueError(f"Unsupported model type: {self.config.model_type}")
 
         try:
-            self.api_key = os.getenv(API_KEY_VARS.get(self.model_type, ""))
+            self.api_key = os.getenv(API_KEY_VARS.get(self.config.model_type, ""))
         except Exception as e:
-            raise ValueError(f"Error occurred while fetching API key for {self.model_type}: {e}")
+            raise ValueError(f"Error occurred while fetching API key for {self.config.model_type}: {e}")
 
         # TODO: Need to verify model names and matching with model types
         if self.config.model_name is None:
@@ -109,7 +115,7 @@ class LanguageModelBase:
             logger.warning(f"Max tokens {self.config.max_tokens} may exceed limits for some models. Consider reducing to 2048 or less.")
             self.config.max_tokens = 2048
 
-        self.client = CLIENT_TYPES.get(self.model_type, OpenAI)(api_key=self.api_key)
+        self.client = CLIENT_TYPES.get(self.config.model_type, OpenAI)(api_key=self.api_key)
 
 
     def update_system_instruction(self, instruction: str):
@@ -126,7 +132,7 @@ class LanguageModelBase:
             self.history.append({"role": "user", "parts": [{"text": content}]})
 
 
-    def generate_response(self, max_tokens=None):
+    def generate_response(self, memory_nodes: Optional[List["MemoryNode"]] = None, max_tokens: Optional[int] = None):
         """
         Sends messages to the model via the respective API client.
         """
@@ -136,9 +142,14 @@ class LanguageModelBase:
 
         if max_tokens is None:
             max_tokens = self.config.max_tokens
+        
+        memory = ""
+        if memory_nodes is not None:
+            for node in memory_nodes:
+                memory += f"# Memory Type\n{node.fact_type}\n\n# Timestamp\n{node.timestamp.isoformat()}\n\n{node.text}\n\n{'-' * 10}\n\n"
 
         if self.config.model_type == "openai":
-            messages = self.to_openai()
+            messages = self.to_openai(memory=memory)
             # logger.info(f"System instruction:\n{messages[0]['content']}\n")
             response = self.client.chat.completions.create(
                 model=self.config.model_name,
@@ -149,7 +160,7 @@ class LanguageModelBase:
             return response
             
         elif self.config.model_type == "anthropic":
-            system_prompt, anthropic_msgs = self.to_anthropic()
+            system_prompt, anthropic_msgs = self.to_anthropic(memory=memory)
             response = self.client.messages.create(
                 model=self.config.model_name,
                 max_tokens=max_tokens,
@@ -160,7 +171,7 @@ class LanguageModelBase:
             return response
             
         elif self.config.model_type == "google":
-            system_instruction, contents = self.to_google()
+            system_instruction, contents = self.to_google(memory=memory)
             # logger.info(f"System instruction:\n{system_instruction}")
             response = self.client.models.generate_content(
                 model=self.config.model_name,
@@ -172,8 +183,11 @@ class LanguageModelBase:
             )
             self.history.append(response.candidates[0].content) # Record in history
             return response
+
+    async def agenerate_response(self, memory_nodes: Optional[List["MemoryNode"]] = None, max_tokens: Optional[int] = None):
+        return await asyncio.to_thread(self.generate_response, memory_nodes, max_tokens)
     
-    def to_openai(self, tool_info=None):
+    def to_openai(self, tool_info=None, memory: Optional[str] = "") -> List[Dict]:
         """
         OpenAI format: system, user, assistant, tool.
         Note: 'tool' role requires a 'tool_call_id'. 
@@ -182,20 +196,21 @@ class LanguageModelBase:
         openai_msgs = [{"role": "system", "content": self.system_instruction}]
         openai_msgs.extend(self.history)
 
-        if tool_info is None:
-            return openai_msgs
-        
-        # Add tool information
-        if tool_info["tool_summaries"] == "":
-            openai_msgs.append({"role": "system", "content": "No tools currently available."})
-        else:
-            openai_msgs.append({"role": "system", "content": f"Available tools summaries:\n{tool_info['tool_summaries']}"})
-            if tool_info["tool_manuals"] != "":
-                openai_msgs.append({"role": "system", "content": f"Active tools full manuals:\n{tool_info['tool_manuals']}"})
+        if memory != "":
+            openai_msgs.append({"role": "system", "content": f"Relevant memory for past sessions:\n{memory}"})
+
+        if tool_info is not None:
+            # Add tool information
+            if tool_info["tool_summaries"] == "":
+                openai_msgs.append({"role": "system", "content": "No tools currently available."})
+            else:
+                openai_msgs.append({"role": "system", "content": f"Available tools summaries:\n{tool_info['tool_summaries']}"})
+                if tool_info["tool_manuals"] != "":
+                    openai_msgs.append({"role": "system", "content": f"Active tools full manuals:\n{tool_info['tool_manuals']}"})
         
         return openai_msgs
 
-    def to_anthropic(self, tool_info=None):
+    def to_anthropic(self, tool_info=None, memory: Optional[str] = "") -> (str, List[Dict]):
         """
         Anthropic format: user, assistant. 
         System messages must be passed separately.
@@ -205,20 +220,21 @@ class LanguageModelBase:
         anthropic_msgs = []
         anthropic_msgs.extend(self.history)
 
-        if tool_info is None:
-            return system_prompt, anthropic_msgs
-        
-        # Add tool information as system prompt
-        if tool_info["tool_summaries"] == "":
-            system_prompt += "No tools currently available.\n"
-        else:
-            system_prompt += f"Available tools summaries:\n{tool_info['tool_summaries']}\n"
-            if tool_info["tool_manuals"] != "":
-                system_prompt += f"Active tools full manuals:\n{tool_info['tool_manuals']}\n"
+        if memory != "":
+            system_prompt += f"\nRelevant memory for past sessions:\n{memory}\n"
+
+        if tool_info is not None:
+            # Add tool information as system prompt
+            if tool_info["tool_summaries"] == "":
+                system_prompt += "No tools currently available.\n"
+            else:
+                system_prompt += f"Available tools summaries:\n{tool_info['tool_summaries']}\n"
+                if tool_info["tool_manuals"] != "":
+                    system_prompt += f"Active tools full manuals:\n{tool_info['tool_manuals']}\n"
 
         return system_prompt, anthropic_msgs
 
-    def to_google(self, tool_info=None):
+    def to_google(self, tool_info=None, memory: Optional[str] = "") -> (str, List[Dict]):
         """
         Google Gemini format: user, model.
         System instructions are separate.
@@ -228,19 +244,20 @@ class LanguageModelBase:
         google_msgs = []
         google_msgs.extend(self.history)
 
-        if tool_info is None:
-            return system_instruction, google_msgs
-        
-        # Add tool information as system instruction
-        if tool_info["tool_summaries"] == "":
-            # logger.info("No tools currently available.")
-            system_instruction += "No tools currently available.\n"
-        else:
-            # logger.info(f"Available tools summaries:\n{tool_info['tool_summaries']}")
-            system_instruction += f"Available tools summaries:\n{tool_info['tool_summaries']}\n"
-            if tool_info["tool_manuals"] != "":
-                # logger.info(f"Active tools full manuals:\n{tool_info['tool_manuals']}")
-                system_instruction += f"Active tools full manuals:\n{tool_info['tool_manuals']}\n"
+        if memory != "":
+            system_instruction += f"\nRelevant memory for past sessions:\n{memory}\n"
+
+        if tool_info is not None:
+            # Add tool information as system instruction
+            if tool_info["tool_summaries"] == "":
+                # logger.info("No tools currently available.")
+                system_instruction += "No tools currently available.\n"
+            else:
+                # logger.info(f"Available tools summaries:\n{tool_info['tool_summaries']}")
+                system_instruction += f"Available tools summaries:\n{tool_info['tool_summaries']}\n"
+                if tool_info["tool_manuals"] != "":
+                    # logger.info(f"Active tools full manuals:\n{tool_info['tool_manuals']}")
+                    system_instruction += f"Active tools full manuals:\n{tool_info['tool_manuals']}\n"
         
         return system_instruction, google_msgs
 
@@ -311,9 +328,9 @@ class LanguageModelBase:
     
 
 
-class ClientLanguageModel(LanguageModelBase):
-    def __init__(self, model_type="google", model_name=None):
-        super().__init__(model_type, model_name)
+class ClientLanguageModel(BaseLanguageModel):
+    def __init__(self, config: Optional[LanguageModelConfig] = None):
+        super().__init__(config=config)
 
         tool_definition_path = f"tool_definitions_{self.config.model_type}.json"
         with open(tool_definition_path, "r") as f:
@@ -360,7 +377,7 @@ class ClientLanguageModel(LanguageModelBase):
                 }]
             })
 
-    def generate_response(self, tool_info, max_tokens=None):
+    def generate_response(self, tool_info, memory_nodes: Optional[List["MemoryNode"]] = None, max_tokens=None):
         """
         Sends messages to the model via the respective API client.
         """
@@ -371,8 +388,13 @@ class ClientLanguageModel(LanguageModelBase):
         if max_tokens is None:
             max_tokens = self.config.max_tokens
 
+        memory = ""
+        if memory_nodes is not None:
+            for node in memory_nodes:
+                memory += f"# Memory Type\n{node.fact_type}\n\n# Timestamp\n{node.timestamp.isoformat()}\n\n{node.text}\n\n{'-' * 10}\n\n"
+
         if self.config.model_type == "openai":
-            messages = self.to_openai(tool_info)
+            messages = self.to_openai(tool_info, memory=memory)
             # logger.info(f"System instruction:\n{messages[0]['content']}\n")
             response = self.client.chat.completions.create(
                 model=self.config.model_name,
@@ -384,7 +406,7 @@ class ClientLanguageModel(LanguageModelBase):
             return response
             
         elif self.config.model_type == "anthropic":
-            system_prompt, anthropic_msgs = self.to_anthropic(tool_info)
+            system_prompt, anthropic_msgs = self.to_anthropic(tool_info, memory=memory)
             response = self.client.messages.create(
                 model=self.config.model_name,
                 max_tokens=max_tokens,
@@ -395,7 +417,7 @@ class ClientLanguageModel(LanguageModelBase):
             return response
             
         elif self.config.model_type == "google":
-            system_instruction, contents = self.to_google(tool_info)
+            system_instruction, contents = self.to_google(tool_info, memory=memory)
             # logger.info(f"System instruction:\n{system_instruction}")
             response = self.client.models.generate_content(
                 model=self.config.model_name,
@@ -409,57 +431,18 @@ class ClientLanguageModel(LanguageModelBase):
             self.history.append(response.candidates[0].content) # Record in history
             return response
 
-    # parse_response method is inherited from LanguageModelBase
-    
-    def summarize_memory(self, max_memory_tokens: int = 512) -> str:
-        self.add_user_message(_summary_system_prompt(max_memory_tokens))
-        response = self.generate_response(max_tokens=max_memory_tokens)
-        return self.parse_response(response)
+    async def agenerate_response(self, tool_info, memory_nodes: Optional[List["MemoryNode"]] = None, max_tokens=None):
+        return await asyncio.to_thread(self.generate_response, tool_info, memory_nodes, max_tokens)
 
-    def _summary_system_prompt(max_memory_tokens: int) -> str:
-        return f"""IMPORTANT: This message and these instructions are NOT part of the actual user conversation. Do NOT include any references to "note-taking", "session notes extraction", or these update instructions in the notes content.
+    # parse_response method is inherited from BaseLanguageModel
 
-Based on the user conversation above (EXCLUDING this note-taking instruction message as well as system prompt, claude.md entries, or any past session summaries), update the session notes file.
-
-The file {{notesPath}} has already been read for you. Here are its current contents:
-<current_notes_content>
-{{currentNotes}}
-</current_notes_content>
-
-Your ONLY task is to use the Edit tool to update the notes file, then stop. You can make multiple edits (update every section as needed) - make all Edit tool calls in parallel in a single message. Do not call any other tools.
-
-CRITICAL RULES FOR EDITING:
-- The file must maintain its exact structure with all sections, headers, and italic descriptions intact
--- NEVER modify, delete, or add section headers (the lines starting with '#' like # Task specification)
--- NEVER modify or delete the italic _section description_ lines (these are the lines in italics immediately following each header - they start and end with underscores)
--- The italic _section descriptions_ are TEMPLATE INSTRUCTIONS that must be preserved exactly as-is - they guide what content belongs in each section
--- ONLY update the actual content that appears BELOW the italic _section descriptions_ within each existing section
--- Do NOT add any new sections, summaries, or information outside the existing structure
-- Do NOT reference this note-taking process or instructions anywhere in the notes
-- It's OK to skip updating a section if there are no substantial new insights to add. Do not add filler content like "No info yet", just leave sections blank/unedited if appropriate.
-- Write DETAILED, INFO-DENSE content for each section - include specifics like file paths, function names, error messages, exact commands, technical details, etc.
-- For "Key results", include the complete, exact output the user requested (e.g., full table, full answer, etc.)
-- Do not include information that's already in the CLAUDE.md files included in the context
-- Keep each section under ~{max_memory_tokens} tokens/words - if a section is approaching this limit, condense it by cycling out less important details while preserving the most critical information
-- Focus on actionable, specific information that would help someone understand or recreate the work discussed in the conversation
-- IMPORTANT: Always update "Current State" to reflect the most recent work - this is critical for continuity after compaction
-
-Use the Edit tool with file_path: {{notesPath}}
-
-STRUCTURE PRESERVATION REMINDER:
-Each section has TWO parts that must be preserved exactly as they appear in the current file:
-1. The section header (line starting with #)
-2. The italic description line (the _italicized text_ immediately after the header - this is a template instruction)
-
-You ONLY update the actual content that comes AFTER these two preserved lines. The italic description lines starting and ending with underscores are part of the template structure, NOT content to be edited or removed.
-
-REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edits. Only include insights from the actual user conversation, never from these note-taking instructions. Do not delete or change section headers or italic _section descriptions_.
-"""
+    def get_history(self) -> List[Dict]:
+        return self.history
 
     
-class MemoryLanguageModel(LanguageModelBase):
-    def __init__(self, model_type="google", model_name=None):
-        super().__init__(model_type, model_name)
+class MemoryLanguageModel(BaseLanguageModel):
+    def __init__(self, config: Optional[LanguageModelConfig] = None):
+        super().__init__(config=config)
     
     def extract_entities(self, context: str, max_entities: int, max_tokens: int = 256):
         self.system_instruction = self._entities_system_prompt(max_entities)
@@ -467,6 +450,13 @@ class MemoryLanguageModel(LanguageModelBase):
         response = self.generate_response(max_tokens=max_tokens)
         return self.parse_response(response)
 
+    async def aextract_entities(self, context: str, max_entities: int, max_tokens: int = 256):
+        self.system_instruction = self._entities_system_prompt(max_entities)
+        self.add_user_message(context)
+        response = await self.agenerate_response(max_tokens=max_tokens)
+        return self.parse_response(response)
+
+    @staticmethod
     def _entities_system_prompt(max_entities: int) -> str:
         return (
             "You extract named entities for memory indexing. "
@@ -484,6 +474,13 @@ class MemoryLanguageModel(LanguageModelBase):
         response = self.generate_response(max_tokens=max_tokens)
         return self.parse_response(response)
 
+    async def aidentify_causes(self, context: str, max_causes: int, max_tokens: int = 256):
+        self.system_instruction = self._causes_system_prompt(max_causes)
+        self.add_user_message(context)
+        response = await self.agenerate_response(max_tokens=max_tokens)
+        return self.parse_response(response)
+
+    @staticmethod
     def _causes_system_prompt(max_causes: int) -> str:
         return (
             f"You are a Causal Logic Engine. Your task is to analyze the causal relationship "
@@ -499,7 +496,7 @@ class MemoryLanguageModel(LanguageModelBase):
             f"- Output exactly {max_causes} entries in the JSON array.\n\n"
             "### OUTPUT FORMAT:\n"
             "Return ONLY valid JSON in this shape:\n"
-            '{"causalities": [{"memory_id": "string", "level": integer}]}'
+            '{"causalities": [{"memory_id": integer, "level": integer}]}'
         )
 
     def neural_rerank(self, query: str, num_memories: int, max_tokens: int = 256):
@@ -508,10 +505,17 @@ class MemoryLanguageModel(LanguageModelBase):
         response = self.generate_response(max_tokens=max_tokens)
         return self.parse_response(response)
 
+    async def aneural_rerank(self, query: str, num_memories: int, max_tokens: int = 256):
+        self.system_instruction = self._rerank_system_prompt(num_memories)
+        self.add_user_message(query)
+        response = await self.agenerate_response(max_tokens=max_tokens)
+        return self.parse_response(response)
+
+    @staticmethod
     def _rerank_system_prompt(num_memories: int) -> str:
         return (
             "You are a Semantic Relevance Auditor. Your task is to rank a set of memory nodes "
-            f"based on their utility in answering the following User Query: '{query}'\n\n"
+            f"based on their utility in answering the User's next query.\n\n"
             "### RANKING CRITERIA:\n"
             "1. DIRECT ANSWER: Does the memory contain the specific information requested?\n"
             "2. CONTEXTUAL SUPPORT: Does the memory provide necessary background or 'why' for the query?\n"
@@ -524,16 +528,27 @@ class MemoryLanguageModel(LanguageModelBase):
             "- Do not allow ties; every memory must have a distinct rank.\n\n"
             "### OUTPUT FORMAT:\n"
             "Return ONLY valid JSON with this exact structure:\n"
-            '{"ranks": [{"memory_id": "string", "rank": integer}]}'
+            '{"ranks": [{"memory_id": integer, "rank": integer}]}'
         )
 
 
 # Stateless single-time LLM request
-def llm_side_request(query: str, system_instruction: str = "", config: SideRequestConfig = SideRequestConfig()):
-    llm = LanguageModelBase(config.model_type, config.model_name)
+def llm_side_request(query: str, system_instruction: str = "", config: Optional[LanguageModelConfig] = None):
+    config = config or LanguageModelConfig()
+    llm = BaseLanguageModel(config)
     llm.update_system_instruction(system_instruction)
     llm.add_user_message(query)
-    response = llm.generate_response(config.max_tokens)
+    response = llm.generate_response(max_tokens=config.max_tokens)
+    result = llm.parse_response(response)
+    return result
+
+
+async def llm_side_request_async(query: str, system_instruction: str = "", config: Optional[LanguageModelConfig] = None):
+    config = config or LanguageModelConfig()
+    llm = BaseLanguageModel(config)
+    llm.update_system_instruction(system_instruction)
+    llm.add_user_message(query)
+    response = await llm.agenerate_response(max_tokens=config.max_tokens)
     result = llm.parse_response(response)
     return result
 
