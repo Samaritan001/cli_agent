@@ -4,7 +4,7 @@ import secrets
 from collections import defaultdict
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set
 import glob
 import json
 import os
@@ -24,6 +24,37 @@ from fastembed import TextEmbedding
 # from memory_llm import MemoryLLMBackend, NullMemoryLLM, build_memory_llm_from_env
 from model import llm_side_request, llm_side_request_async, LanguageModelConfig
 
+DEFAULT_SESSION_MEMORY_TEMPLATE = """
+# Session Title
+_A short and distinctive 5-10 word descriptive title for the session. Super info dense, no filler_
+
+# Current State
+_What is actively being worked on right now? Pending tasks not yet completed. Immediate next steps._
+
+# Task specification
+_What did the user ask to build? Any design decisions or other explanatory context_
+
+# Files and Functions
+_What are the important files? In short, what do they contain and why are they relevant?_
+
+# Workflow
+_What bash commands are usually run and in what order? How to interpret their output if not obvious?_
+
+# Errors & Corrections
+_Errors encountered and how they were fixed. What did the user correct? What approaches failed and should not be tried again?_
+
+# Codebase and System Documentation
+_What are the important system components? How do they work/fit together?_
+
+# Learnings
+_What has worked well? What has not? What to avoid? Do not duplicate items from other sections_
+
+# Key results
+_If the user asked a specific output such as an answer to a question, a table, or other document, repeat the exact result here_
+
+# Worklog
+_Step by step, what was attempted, done? Very terse summary for each step_
+"""
 
 def _stable_int_id() -> int:
     """Return a positive int64-friendly id for FAISS (avoid 128-bit uuid overflow)."""
@@ -70,10 +101,13 @@ class MemoryEngine:
         # Stored within MemoryNode
 
         # --- RECALL PARAMETERS ---
+        # 0. Recall Range
+        self.latest_message_id = 0
         # 2. Entity Search Parameters
         self.avg_dl = 0.0 # Average document length for BM25
         # 5. TODO: Implement temporal recalling by absolute timestamp matching, also consider time decay functions
         # 7. TODO: Minimum score threshold for a node to be included in recall results
+        
 
     @staticmethod
     def _safe_json_loads(raw_content: str) -> Optional[Dict]:
@@ -136,6 +170,7 @@ class MemoryEngine:
         ranked.sort(key=lambda x: x[0])
         return [memory_id for _, memory_id in ranked]
 
+    # TODO: better summarize triggering algorithm
     def should_summarize_turn(self, user_input: str, assistant_output: str, had_tool_calls: bool, pending_turns: int) -> bool:
         importance = 0.0
         total_chars = len(user_input.strip()) + len(assistant_output.strip())
@@ -149,20 +184,55 @@ class MemoryEngine:
             return True
         return importance >= self.config.summary_importance_threshold
 
-    # TODO: use LLM to summarize, which should increase the buffer size, Claude Code summary prompt requires direct write to file ability.
+    # TODO: Original Claude Code summary prompt requires direct write to file ability.
+    # TODO: Convert files, images, and other formats to text
     @staticmethod
-    def summarize_turn_buffer(turn_buffer: List[Dict[str, str]], max_chars: int = 1200) -> str:
-        # Deterministic condensation keeps write path reliable even if LLM parsing fails.
-        lines: List[str] = []
-        for idx, turn in enumerate(turn_buffer, start=1):
-            user = turn.get("user", "").strip()
-            assistant = turn.get("assistant", "").strip()
-            lines.append(f"Turn {idx} User: {user}")
-            lines.append(f"Turn {idx} Assistant: {assistant}")
-        summary = "\n".join(lines)
-        if len(summary) > max_chars:
-            return summary[:max_chars].rstrip() + "..."
-        return summary
+    def summarize_turn_buffer(history) -> str:
+        context = self._summary_system_prompt()
+        result = llm_side_request(context, config=self.model_config, history=history)
+        summary = self._safe_json_loads(result.get("content", ""))
+        if summary.stripe():
+            return summary
+        logger.warning("memory_llm summarize_turn schema validation failed: %s", result.get("content", ""))
+        return ""
+
+    @staticmethod
+    def _summary_system_prompt() -> str:
+        return f"""IMPORTANT: This message and these instructions are NOT part of the actual user conversation. Do NOT include any references to "note-taking", "session notes extraction", or these update instructions in the notes content.
+
+Based on the user conversation above (EXCLUDING this note-taking instruction message as well as system prompt, or any past session summaries), update the session memory.
+
+The current content structure is:
+<current_notes_content>
+{DEFAULT_SESSION_MEMORY_TEMPLATE}
+</current_notes_content>
+
+Your ONLY task is to use the Edit tool to update the notes file, then stop. You can make multiple edits (update every section as needed) - make all Edit tool calls in parallel in a single message. Do not call any other tools.
+
+CRITICAL RULES FOR EDITING:
+- The file must maintain its exact structure with all sections, headers, and italic descriptions intact
+-- NEVER modify, delete, or add section headers (the lines starting with '#' like # Task specification)
+-- NEVER modify or delete the italic _section description_ lines (these are the lines in italics immediately following each header - they start and end with underscores)
+-- The italic _section descriptions_ are TEMPLATE INSTRUCTIONS that must be preserved exactly as-is - they guide what content belongs in each section
+-- ONLY update the actual content that appears BELOW the italic _section descriptions_ within each existing section
+-- Do NOT add any new sections, summaries, or information outside the existing structure
+- Do NOT reference this note-taking process or instructions anywhere in the notes
+- It's OK to skip updating a section if there are no substantial new insights to add. Do not add filler content like "No info yet", just leave sections blank/unedited if appropriate.
+- Write DETAILED, INFO-DENSE content for each section - include specifics like file paths, function names, error messages, exact commands, technical details, etc.
+- For "Key results", include the complete, exact output the user requested (e.g., full table, full answer, etc.)
+- Do not include information that's already in the CLAUDE.md files included in the context
+- Keep each section under ~{self.config.summary_token_limit} tokens/words - if a section is approaching this limit, condense it by cycling out less important details while preserving the most critical information
+- Focus on actionable, specific information that would help someone understand or recreate the work discussed in the conversation
+
+STRUCTURE PRESERVATION REMINDER:
+Each section has TWO parts that must be preserved exactly as they appear in the current file:
+1. The section header (line starting with #)
+2. The italic description line (the _italicized text_ immediately after the header - this is a template instruction)
+
+You ONLY update the actual content that comes AFTER these two preserved lines. The italic description lines starting and ending with underscores are part of the template structure, NOT content to be edited or removed.
+
+REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edits. Only include insights from the actual user conversation, never from these note-taking instructions. Do not delete or change section headers or italic _section descriptions_.
+"""
 
     def load_memory(self):
         if not os.path.exists(self.config.memory_dir):
@@ -225,6 +295,9 @@ class MemoryEngine:
         
         self.semantic_index.add_with_ids(embeddings, ids)
 
+        if loaded_nodes:
+            self.latest_message_id = max((node.message_id_range[1] for node in loaded_nodes), default=0)
+
         logger.info(f"Successfully hydrated memory: {len(self.nodes)} nodes loaded and indexed.")
 
     async def aload_memory(self):
@@ -267,12 +340,14 @@ class MemoryEngine:
         async with self._lock:
             await asyncio.to_thread(self.save_memory)
    
-    def remember(self, context: str):
+    def remember(self, context: str, message_id_range: Optional[List[int]] = None) -> int:
         """
         STAGE 1: REMEMBER
         Extracts facts and updates graph indices.
         """
         node_id = _stable_int_id()
+        if message_id_range is None:
+            message_id_range = [0, 0]
 
         raw = list(self.embedding_model.embed([context]))
         embedding = np.asarray(raw, dtype=np.float32)
@@ -309,6 +384,7 @@ class MemoryEngine:
             entities=entity_counts,
             causes=causes,
             effects={},
+            message_id_range=message_id_range
         )
 
         # Store node and update Temporal Stream
@@ -316,18 +392,25 @@ class MemoryEngine:
         self.temporal_stream.append(node_id)
         n = len(self.nodes)
         self.avg_dl = (self.avg_dl * (n - 1) + len(context_tokens)) / max(n, 1)
+        self.latest_message_id = max(self.latest_message_id, message_id_range[1])
 
         return node_id
 
-    async def aremember(self, context: str):
+    async def aremember(self, context: str, message_id_range: List[int]):
         async with self._lock:
-            return await asyncio.to_thread(self.remember, context)
+            return await asyncio.to_thread(self.remember, context, message_id_range)
 
-    def recall(self, query: str) -> List[MemoryNode]:
+    def recall(self, query: str, earliest_history_id: Optional[int] = 0) -> Tuple[int, List[MemoryNode]]:
         """
         STAGE 2: RECALL
         Multi-channel retrieval: Semantic, Entity, and Graph Traversal.
         """
+        def is_valid(nid: int) -> bool:
+            if earliest_history_id == 0: return True
+            node = self.nodes.get(nid)
+            # Exclude node if it overlaps with preserved history
+            return node is not None and node.message_id_range[1] < earliest_history_id
+
         # 1. Semantic Search (O(log n) with HNSW)
         if not self.nodes:
             return []
@@ -339,9 +422,11 @@ class MemoryEngine:
 
         distances, ids = self.semantic_index.search(query_embedding, self.config.semantic_K)
         semantic_candidates = [int(i) for i in ids[0].tolist() if int(i) >= 0]
+        semantic_candidates = list(dict.fromkeys(semantic_candidates))  # Deduplicate while preserving order
 
         # 2. Entity Lookup (O(1) via Hash Map)
         entity_candidates = self.entity_bm25(query)
+        entity_candidates = list(dict.fromkeys(entity_candidates))  # Deduplicate while preserving order
 
         # 3. Cause-Effect Spreading (Graph Traversal)
         merged_cause_effect: Dict[int, int] = {}
@@ -362,6 +447,12 @@ class MemoryEngine:
             key=lambda x: merged_cause_effect[x],
             reverse=True,
         )[: self.config.cause_effect_K]
+        cause_effect_candidates = list(dict.fromkeys(cause_effect_candidates))  # Deduplicate while preserving order
+
+        # Filter candidates based on earliest_history_id
+        semantic_candidates = [nid for nid in semantic_candidates if is_valid(nid)]
+        entity_candidates = [nid for nid in entity_candidates if is_valid(nid)]
+        cause_effect_candidates = [nid for nid in cause_effect_candidates if is_valid(nid)]
 
         # 4. Fusion: merge semantic, entity, and cause lists via Reciprocal Rank Fusion (RRF).
         # TODO: match a certain time range
@@ -377,10 +468,8 @@ class MemoryEngine:
         ranked_candidates = self.neural_rerank(list(scored_candidates.keys()), query)
 
         # 7. Final ordering: prepend recent stream, then fill remainder from reranked list (deduped later).
-        w = self.config.direct_temporal_window
-        rank_budget = max(0, self.config.max_recall - w)
         # TODO: Prune using score threshold
-        final_ids = self.temporal_stream[-w:] + ranked_candidates[:rank_budget]
+        final_ids = ranked_candidates[:self.config.max_recall]
         
         # 8. Compute token budget
         final_nodes = []
@@ -399,11 +488,11 @@ class MemoryEngine:
             final_nodes.append(node)
 
         # return the memory nodes
-        return final_nodes
+        return self.latest_message_id, final_nodes
 
-    async def arecall(self, query: str) -> List[MemoryNode]:
+    async def arecall(self, query: str, earliest_history_id: Optional[int] = 0) -> Tuple[int, List[MemoryNode]]:
         async with self._lock:
-            return await asyncio.to_thread(self.recall, query)
+            return await asyncio.to_thread(self.recall, query, earliest_history_id)
 
     # TODO: Function: Implement reflection using LLM
     def reflect(self, node_ids: List[int]) -> str:
@@ -423,10 +512,7 @@ class MemoryEngine:
         # return summary
         pass
  
-    # TODO: Outside the MemoryEngine:
-    # Convert history to context string
-    # Convert files, images, and other formats to text
-
+    
     # Extract entities from context using LLM
     def extract_entities(self, context: str) -> List[str]:
         # result = self.llm.extract_entities(context, self.config.entity_N)
@@ -540,7 +626,7 @@ class MemoryEngine:
 
         # STEP 3: Rank and return top-k
         sorted_ids = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)
-        return sorted_ids[: self.config.entity_K]
+        return sorted_ids[:self.config.entity_K]
 
     def rrf(self, ranked_lists: Dict[str, List[int]]) -> Dict[int, float]:
         """

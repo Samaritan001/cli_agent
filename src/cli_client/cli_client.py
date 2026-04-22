@@ -16,7 +16,7 @@ LOG_FORMAT = "\033[32m%(levelname)s\033[0m:    %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger("cli_client")
 
-SERVER_URL = "http://127.0.0.1:8000/orchestrate"
+ORCHESTRATOR_URL = "http://127.0.0.1:8000/orchestrate"
 MEMORY_DIR = "./memory_docs"
 
 # def clean_json_string(raw_string):
@@ -47,8 +47,19 @@ class CLIClient:
         self.tool_manager = ToolManualManager()
         self.language_model = ClientLanguageModel(config=LanguageModelConfig(model_type=model_type, model_name=model_name))
         self.memory_engine = MemoryEngine(config=MemoryConfig(memory_dir=MEMORY_DIR), model_config=self.language_model.config)
-        self.turn_buffer: List[Dict[str, str]] = []
-        # TODO: load tool summaries by sending a list command
+        self.memory_buffer_start_id = 0
+        self.history_window = 10  # Number of recent turns to keep in direct history context
+        
+        asyncio.run(self._list_available_servers())
+    
+    async def _list_available_servers(self):
+        async with httpx.AsyncClient() as client:
+            response = await client.post(ORCHESTRATOR_URL, json={"id": "auto-listing", "command": "list_available_servers"})
+            if response.status_code == status.HTTP_200_OK:
+                self.tool_manager.register_summary(json.loads(response["result"]))
+                logger.info("Successfully retrieved and registered available servers.")
+            else:
+                logger.error(f"Error listing servers: {response.status_code} - {response.text}")
 
     async def agent_loop(self):                
         try:
@@ -59,16 +70,22 @@ class CLIClient:
                     "--- User Input ---\nEnter your message for the agent (or 'quit' to exit):\n",
                 )
                 if user_input.lower() == "quit":
-                    await self._flush_turn_buffer()
+                    await self._flush_memory_buffer()
                     break
-                self.language_model.add_user_message(user_input)
+                message_id = self.language_model.add_user_message(user_input)
 
                 print(f"\n--- Agent Response ---")
-                recalled_nodes = await self.memory_engine.arecall(user_input)
+                earliest_message_id = max(0, message_id - self.history_window)
+                latest_stored_message_id, recalled_nodes = await self.memory_engine.arecall(
+                    query=user_input,
+                    earliest_message_id=earliest_message_id
+                )
+                temp_history_window = message_id - min(earliest_message_id, latest_stored_message_id+1)
                 llm_output = self.language_model.parse_response(
                     await self.language_model.agenerate_response(
                         self.tool_manager.get_tool_info(),
                         memory_nodes=recalled_nodes,
+                        history_window=temp_history_window
                     )
                 )
                 if self.test_flag:
@@ -80,10 +97,12 @@ class CLIClient:
                 had_tool_calls = len(tool_calls) > 0
                 while len(tool_calls) > 0:
                     await self.tool_callings(tool_calls)
+                    temp_history_window = message_id - min(earliest_message_id, latest_stored_message_id+1)
                     llm_output = self.language_model.parse_response(
                         await self.language_model.agenerate_response(
                             self.tool_manager.get_tool_info(),
                             memory_nodes=recalled_nodes,
+                            history_window=temp_history_window
                         )
                     )
                     if self.test_flag:
@@ -93,16 +112,17 @@ class CLIClient:
                         print(f"{content}\n")
                     tool_calls = llm_output.get("tool_calls", [])
 
-                # TODO: add tool-calling and tool results to memory buffer, include only important tool results
-                # TODO: with memories, what history window should be kept? Should we not use most recent memory nodes as they are already in history?
-                self.turn_buffer.append({"user": user_input, "assistant": content})
+                # TODO: filter out only important tool results
+                # TODO: better summarization triggering algorithm
+                if self.memory_buffer_start_id == 0:
+                    self.memory_buffer_start_id = message_id
                 if self.memory_engine.should_summarize_turn(
                     user_input=user_input,
                     assistant_output=content,
                     had_tool_calls=had_tool_calls,
-                    pending_turns=len(self.turn_buffer),
+                    pending_turns=message_id - self.memory_buffer_start_id + 1,
                 ):
-                    await self._flush_turn_buffer()
+                    await self._flush_memory_buffer()
         finally:
             await self.memory_engine.asave_memory()
 
@@ -126,7 +146,7 @@ class CLIClient:
             logger.info(f"Calling command '{call['command']}' with arguments {call}")
 
         async with httpx.AsyncClient() as client:
-            call_requests = [client.post(SERVER_URL, json=call) for call in calls]
+            call_requests = [client.post(ORCHESTRATOR_URL, json=call) for call in calls]
             call_responses = await asyncio.gather(*call_requests)
 
         # Tool calls reponse postprocess
@@ -135,10 +155,11 @@ class CLIClient:
             id = call_resp.get("id")
             command = command_records[id][0]
             server_name = command_records[id][1]
+            message_id = 0
             if call_resp["status"] != status.HTTP_200_OK:
                 error_status = call_resp["status"]
                 detail = call_resp["detail"]
-                self.language_model.add_tool_response(
+                message_id = self.language_model.add_tool_response(
                     content=f"{error_status} - {detail}",
                     command=command,
                     tool_call_id=id
@@ -162,7 +183,7 @@ class CLIClient:
                 else:
                     result = "Unknown command response."
 
-                self.language_model.add_tool_response(
+                message_id = self.language_model.add_tool_response(
                     content=result,
                     command=command,
                     tool_call_id=id
@@ -170,8 +191,9 @@ class CLIClient:
                 
                 logger.info(f"✅ Success in tool call id {id}")
                 logger.info(f"ℹ️  Info: {call_resp.get('info', 'No info available')}\n")
+        
+        return message_id
     
-
     # Function: summarize context into memory content
     async def summarize_memory(self, max_memory_tokens: int = 512):
         self.language_model.add_user_message(self._summary_system_prompt(max_memory_tokens))
@@ -182,54 +204,14 @@ class CLIClient:
         )
         return self.language_model.parse_response(response)
 
-    @staticmethod
-    def _summary_system_prompt(max_memory_tokens: int) -> str:
-        return f"""IMPORTANT: This message and these instructions are NOT part of the actual user conversation. Do NOT include any references to "note-taking", "session notes extraction", or these update instructions in the notes content.
-
-Based on the user conversation above (EXCLUDING this note-taking instruction message as well as system prompt, claude.md entries, or any past session summaries), update the session notes file.
-
-The file {{notesPath}} has already been read for you. Here are its current contents:
-<current_notes_content>
-{{currentNotes}}
-</current_notes_content>
-
-Your ONLY task is to use the Edit tool to update the notes file, then stop. You can make multiple edits (update every section as needed) - make all Edit tool calls in parallel in a single message. Do not call any other tools.
-
-CRITICAL RULES FOR EDITING:
-- The file must maintain its exact structure with all sections, headers, and italic descriptions intact
--- NEVER modify, delete, or add section headers (the lines starting with '#' like # Task specification)
--- NEVER modify or delete the italic _section description_ lines (these are the lines in italics immediately following each header - they start and end with underscores)
--- The italic _section descriptions_ are TEMPLATE INSTRUCTIONS that must be preserved exactly as-is - they guide what content belongs in each section
--- ONLY update the actual content that appears BELOW the italic _section descriptions_ within each existing section
--- Do NOT add any new sections, summaries, or information outside the existing structure
-- Do NOT reference this note-taking process or instructions anywhere in the notes
-- It's OK to skip updating a section if there are no substantial new insights to add. Do not add filler content like "No info yet", just leave sections blank/unedited if appropriate.
-- Write DETAILED, INFO-DENSE content for each section - include specifics like file paths, function names, error messages, exact commands, technical details, etc.
-- For "Key results", include the complete, exact output the user requested (e.g., full table, full answer, etc.)
-- Do not include information that's already in the CLAUDE.md files included in the context
-- Keep each section under ~{max_memory_tokens} tokens/words - if a section is approaching this limit, condense it by cycling out less important details while preserving the most critical information
-- Focus on actionable, specific information that would help someone understand or recreate the work discussed in the conversation
-- IMPORTANT: Always update "Current State" to reflect the most recent work - this is critical for continuity after compaction
-
-Use the Edit tool with file_path: {{notesPath}}
-
-STRUCTURE PRESERVATION REMINDER:
-Each section has TWO parts that must be preserved exactly as they appear in the current file:
-1. The section header (line starting with #)
-2. The italic description line (the _italicized text_ immediately after the header - this is a template instruction)
-
-You ONLY update the actual content that comes AFTER these two preserved lines. The italic description lines starting and ending with underscores are part of the template structure, NOT content to be edited or removed.
-
-REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edits. Only include insights from the actual user conversation, never from these note-taking instructions. Do not delete or change section headers or italic _section descriptions_.
-"""
-
-    async def _flush_turn_buffer(self):
-        if not self.turn_buffer:
+    async def _flush_memory_buffer(self, end_message_id: int):
+        if self.memory_buffer_start_id == 0:
             return
-        condensed = self.memory_engine.summarize_turn_buffer(self.turn_buffer)
-        if condensed.strip():
-            await self.memory_engine.aremember(condensed)
-        self.turn_buffer.clear()
+        history_window = end_message_id - self.memory_buffer_start_id + 1
+        summary = self.memory_engine.summarize_memory_buffer(self.language_model.get_history(window=history_window))
+        if summary.strip():
+            await self.memory_engine.aremember(context=summary, message_id_range=[self.memory_buffer_start_id, end_message_id])
+        self.memory_buffer_start_id = 0
 
 
 def generate_list_command():

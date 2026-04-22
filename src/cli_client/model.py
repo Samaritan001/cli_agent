@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, TYPE_CHECKING
 import json
 import logging
 from dataclasses import dataclass
+import time
 
 LOG_FORMAT = "\033[32m%(levelname)s\033[0m:    %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -46,37 +47,6 @@ CLIENT_TYPES = {
     "google": genai.Client
 }
 
-DEFAULT_SESSION_MEMORY_TEMPLATE = """
-# Session Title
-_A short and distinctive 5-10 word descriptive title for the session. Super info dense, no filler_
-
-# Current State
-_What is actively being worked on right now? Pending tasks not yet completed. Immediate next steps._
-
-# Task specification
-_What did the user ask to build? Any design decisions or other explanatory context_
-
-# Files and Functions
-_What are the important files? In short, what do they contain and why are they relevant?_
-
-# Workflow
-_What bash commands are usually run and in what order? How to interpret their output if not obvious?_
-
-# Errors & Corrections
-_Errors encountered and how they were fixed. What did the user correct? What approaches failed and should not be tried again?_
-
-# Codebase and System Documentation
-_What are the important system components? How do they work/fit together?_
-
-# Learnings
-_What has worked well? What has not? What to avoid? Do not duplicate items from other sections_
-
-# Key results
-_If the user asked a specific output such as an answer to a question, a table, or other document, repeat the exact result here_
-
-# Worklog
-_Step by step, what was attempted, done? Very terse summary for each step_
-"""
 
 @dataclass
 class LanguageModelConfig:
@@ -94,6 +64,10 @@ class BaseLanguageModel:
         """
 
         self.history = []
+        self.message_ids = []  # Tracks IDs parallel to history
+        self.session_prefix = int(time.time() * 1000)  # Unique session ID
+        self.msg_seq = 0  # Sequential message counter, first id is session_prefix << 16 + 1
+
         self.system_instruction = ""
         
         self.config = config or LanguageModelConfig()
@@ -122,17 +96,27 @@ class BaseLanguageModel:
         """Allows dynamic updating of system instructions."""
         self.system_instruction = instruction
 
+    # ID generator
+    def _generate_msg_id(self) -> int:
+        self.msg_seq += 1
+        return (self.session_prefix << 16) + self.msg_seq
+
     def add_user_message(self, content: str):
         """Adds a standard message to the history."""
+        message_id = self._generate_msg_id()
+        self.message_ids.append(message_id)
+
         if self.config.model_type == "openai":
             self.history.append({"role": "user", "content": content})
         elif self.config.model_type == "anthropic":
             self.history.append({"role": "user", "content": [{"type": "text", "text": content}]})
         elif self.config.model_type == "google":
             self.history.append({"role": "user", "parts": [{"text": content}]})
+        
+        return message_id
 
 
-    def generate_response(self, memory_nodes: Optional[List["MemoryNode"]] = None, max_tokens: Optional[int] = None):
+    def generate_response(self, max_tokens: Optional[int] = None):
         """
         Sends messages to the model via the respective API client.
         """
@@ -143,13 +127,8 @@ class BaseLanguageModel:
         if max_tokens is None:
             max_tokens = self.config.max_tokens
         
-        memory = ""
-        if memory_nodes is not None:
-            for node in memory_nodes:
-                memory += f"# Memory Type\n{node.fact_type}\n\n# Timestamp\n{node.timestamp.isoformat()}\n\n{node.text}\n\n{'-' * 10}\n\n"
-
         if self.config.model_type == "openai":
-            messages = self.to_openai(memory=memory)
+            messages = self.to_openai()
             # logger.info(f"System instruction:\n{messages[0]['content']}\n")
             response = self.client.chat.completions.create(
                 model=self.config.model_name,
@@ -160,7 +139,7 @@ class BaseLanguageModel:
             return response
             
         elif self.config.model_type == "anthropic":
-            system_prompt, anthropic_msgs = self.to_anthropic(memory=memory)
+            system_prompt, anthropic_msgs = self.to_anthropic()
             response = self.client.messages.create(
                 model=self.config.model_name,
                 max_tokens=max_tokens,
@@ -171,7 +150,7 @@ class BaseLanguageModel:
             return response
             
         elif self.config.model_type == "google":
-            system_instruction, contents = self.to_google(memory=memory)
+            system_instruction, contents = self.to_google()
             # logger.info(f"System instruction:\n{system_instruction}")
             response = self.client.models.generate_content(
                 model=self.config.model_name,
@@ -184,10 +163,10 @@ class BaseLanguageModel:
             self.history.append(response.candidates[0].content) # Record in history
             return response
 
-    async def agenerate_response(self, memory_nodes: Optional[List["MemoryNode"]] = None, max_tokens: Optional[int] = None):
-        return await asyncio.to_thread(self.generate_response, memory_nodes, max_tokens)
+    async def agenerate_response(self, max_tokens: Optional[int] = None):
+        return await asyncio.to_thread(self.generate_response, max_tokens)
     
-    def to_openai(self, tool_info=None, memory: Optional[str] = "") -> List[Dict]:
+    def to_openai(self, tool_info=None) -> List[Dict]:
         """
         OpenAI format: system, user, assistant, tool.
         Note: 'tool' role requires a 'tool_call_id'. 
@@ -195,9 +174,6 @@ class BaseLanguageModel:
         """
         openai_msgs = [{"role": "system", "content": self.system_instruction}]
         openai_msgs.extend(self.history)
-
-        if memory != "":
-            openai_msgs.append({"role": "system", "content": f"Relevant memory for past sessions:\n{memory}"})
 
         if tool_info is not None:
             # Add tool information
@@ -210,7 +186,7 @@ class BaseLanguageModel:
         
         return openai_msgs
 
-    def to_anthropic(self, tool_info=None, memory: Optional[str] = "") -> (str, List[Dict]):
+    def to_anthropic(self, tool_info=None) -> (str, List[Dict]):
         """
         Anthropic format: user, assistant. 
         System messages must be passed separately.
@@ -219,9 +195,6 @@ class BaseLanguageModel:
         system_prompt = self.system_instruction + "\n"
         anthropic_msgs = []
         anthropic_msgs.extend(self.history)
-
-        if memory != "":
-            system_prompt += f"\nRelevant memory for past sessions:\n{memory}\n"
 
         if tool_info is not None:
             # Add tool information as system prompt
@@ -234,7 +207,7 @@ class BaseLanguageModel:
 
         return system_prompt, anthropic_msgs
 
-    def to_google(self, tool_info=None, memory: Optional[str] = "") -> (str, List[Dict]):
+    def to_google(self, tool_info=None) -> (str, List[Dict]):
         """
         Google Gemini format: user, model.
         System instructions are separate.
@@ -243,9 +216,6 @@ class BaseLanguageModel:
         system_instruction = self.system_instruction + "\n"
         google_msgs = []
         google_msgs.extend(self.history)
-
-        if memory != "":
-            system_instruction += f"\nRelevant memory for past sessions:\n{memory}\n"
 
         if tool_info is not None:
             # Add tool information as system instruction
@@ -349,6 +319,9 @@ class ClientLanguageModel(BaseLanguageModel):
     
     def add_tool_response(self, content: str, command: str, tool_call_id: str):
         """Adds a standard message to the history."""
+        message_id = self._generate_msg_id()
+        self.message_ids.append(message_id)
+
         if self.config.model_type == "openai":
             self.history.append({
                 "role": "tool",
@@ -376,8 +349,10 @@ class ClientLanguageModel(BaseLanguageModel):
                     }
                 }]
             })
+        
+        return message_id
 
-    def generate_response(self, tool_info, memory_nodes: Optional[List["MemoryNode"]] = None, max_tokens=None):
+    def generate_response(self, tool_info, max_tokens=None, memory_nodes: Optional[List["MemoryNode"]] = None, history_window: Optional[int] = None):
         """
         Sends messages to the model via the respective API client.
         """
@@ -394,7 +369,7 @@ class ClientLanguageModel(BaseLanguageModel):
                 memory += f"# Memory Type\n{node.fact_type}\n\n# Timestamp\n{node.timestamp.isoformat()}\n\n{node.text}\n\n{'-' * 10}\n\n"
 
         if self.config.model_type == "openai":
-            messages = self.to_openai(tool_info, memory=memory)
+            messages = self.to_openai(tool_info, memory=memory, history_window=history_window)
             # logger.info(f"System instruction:\n{messages[0]['content']}\n")
             response = self.client.chat.completions.create(
                 model=self.config.model_name,
@@ -406,7 +381,7 @@ class ClientLanguageModel(BaseLanguageModel):
             return response
             
         elif self.config.model_type == "anthropic":
-            system_prompt, anthropic_msgs = self.to_anthropic(tool_info, memory=memory)
+            system_prompt, anthropic_msgs = self.to_anthropic(tool_info, memory=memory, history_window=history_window)
             response = self.client.messages.create(
                 model=self.config.model_name,
                 max_tokens=max_tokens,
@@ -417,7 +392,7 @@ class ClientLanguageModel(BaseLanguageModel):
             return response
             
         elif self.config.model_type == "google":
-            system_instruction, contents = self.to_google(tool_info, memory=memory)
+            system_instruction, contents = self.to_google(tool_info, memory=memory, history_window=history_window)
             # logger.info(f"System instruction:\n{system_instruction}")
             response = self.client.models.generate_content(
                 model=self.config.model_name,
@@ -434,9 +409,85 @@ class ClientLanguageModel(BaseLanguageModel):
     async def agenerate_response(self, tool_info, memory_nodes: Optional[List["MemoryNode"]] = None, max_tokens=None):
         return await asyncio.to_thread(self.generate_response, tool_info, memory_nodes, max_tokens)
 
+    def to_openai(self, tool_info=None, memory: Optional[str] = "", history_window: Optional[int] = None) -> List[Dict]:
+        """
+        OpenAI format: system, user, assistant, tool.
+        Note: 'tool' role requires a 'tool_call_id'. 
+        If missing, this script adds a dummy ID for schema compliance.
+        """
+        openai_msgs = [{"role": "system", "content": self.system_instruction}]
+        openai_msgs.extend(self.history[-history_window:] if history_window is not None else self.history)
+
+        if memory != "":
+            openai_msgs.append({"role": "system", "content": f"Relevant memory for past sessions:\n{memory}"})
+
+        if tool_info is not None:
+            # Add tool information
+            if tool_info["tool_summaries"] == "":
+                openai_msgs.append({"role": "system", "content": "No tools currently available."})
+            else:
+                openai_msgs.append({"role": "system", "content": f"Available tools summaries:\n{tool_info['tool_summaries']}"})
+                if tool_info["tool_manuals"] != "":
+                    openai_msgs.append({"role": "system", "content": f"Active tools full manuals:\n{tool_info['tool_manuals']}"})
+        
+        return openai_msgs
+
+    def to_anthropic(self, tool_info=None, memory: Optional[str] = "", history_window: Optional[int] = None) -> (str, List[Dict]):
+        """
+        Anthropic format: user, assistant. 
+        System messages must be passed separately.
+        Tool results are sent as 'user' role with a specific content block structure.
+        """
+        system_prompt = self.system_instruction + "\n"
+        anthropic_msgs = []
+        anthropic_msgs.extend(self.history[-history_window:] if history_window is not None else self.history)
+
+        if memory != "":
+            system_prompt += f"\nRelevant memory for past sessions:\n{memory}\n"
+
+        if tool_info is not None:
+            # Add tool information as system prompt
+            if tool_info["tool_summaries"] == "":
+                system_prompt += "No tools currently available.\n"
+            else:
+                system_prompt += f"Available tools summaries:\n{tool_info['tool_summaries']}\n"
+                if tool_info["tool_manuals"] != "":
+                    system_prompt += f"Active tools full manuals:\n{tool_info['tool_manuals']}\n"
+
+        return system_prompt, anthropic_msgs
+
+    def to_google(self, tool_info=None, memory: Optional[str] = "", history_window: Optional[int] = None) -> (str, List[Dict]):
+        """
+        Google Gemini format: user, model.
+        System instructions are separate.
+        Tool results use the 'function_response' part.
+        """
+        system_instruction = self.system_instruction + "\n"
+        google_msgs = []
+        google_msgs.extend(self.history[-history_window:] if history_window is not None else self.history)
+
+        if memory != "":
+            system_instruction += f"\nRelevant memory for past sessions:\n{memory}\n"
+
+        if tool_info is not None:
+            # Add tool information as system instruction
+            if tool_info["tool_summaries"] == "":
+                # logger.info("No tools currently available.")
+                system_instruction += "No tools currently available.\n"
+            else:
+                # logger.info(f"Available tools summaries:\n{tool_info['tool_summaries']}")
+                system_instruction += f"Available tools summaries:\n{tool_info['tool_summaries']}\n"
+                if tool_info["tool_manuals"] != "":
+                    # logger.info(f"Active tools full manuals:\n{tool_info['tool_manuals']}")
+                    system_instruction += f"Active tools full manuals:\n{tool_info['tool_manuals']}\n"
+        
+        return system_instruction, google_msgs
+
     # parse_response method is inherited from BaseLanguageModel
 
-    def get_history(self) -> List[Dict]:
+    def get_history(self, window: Optional[int] = None) -> List[Dict]:
+        if window is not None:
+            return self.history[-window:]
         return self.history
 
     
@@ -533,21 +584,29 @@ class MemoryLanguageModel(BaseLanguageModel):
 
 
 # Stateless single-time LLM request
-def llm_side_request(query: str, system_instruction: str = "", config: Optional[LanguageModelConfig] = None):
+def llm_side_request(query: str, system_instruction: str = "", config: Optional[LanguageModelConfig] = None, history: Optional[List[Dict]] = None):
     config = config or LanguageModelConfig()
     llm = BaseLanguageModel(config)
     llm.update_system_instruction(system_instruction)
     llm.add_user_message(query)
+
+    if history is not None:
+        llm.history = history
+
     response = llm.generate_response(max_tokens=config.max_tokens)
     result = llm.parse_response(response)
     return result
 
 
-async def llm_side_request_async(query: str, system_instruction: str = "", config: Optional[LanguageModelConfig] = None):
+async def llm_side_request_async(query: str, system_instruction: str = "", config: Optional[LanguageModelConfig] = None, history: Optional[List[Dict]] = None):
     config = config or LanguageModelConfig()
     llm = BaseLanguageModel(config)
     llm.update_system_instruction(system_instruction)
     llm.add_user_message(query)
+
+    if history is not None:
+        llm.history = history
+
     response = await llm.agenerate_response(max_tokens=config.max_tokens)
     result = llm.parse_response(response)
     return result
