@@ -8,7 +8,7 @@ from orchestrator import AIOrchestrator
 
 @pytest.fixture
 def mock_docker():
-    with patch("orchestrator.docker.from_env") as mock_env:
+    with patch("docker.from_env") as mock_env:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_client.containers.run.return_value = mock_container

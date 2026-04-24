@@ -25,6 +25,7 @@ logger = logging.getLogger("orchestrator")
 # --- 1. The Encapsulated Logic ---
 class AIOrchestrator:
     def __init__(self):
+
         self.docker_client = docker.from_env()
         self.registry: Dict[str, Dict[str, str]] = {} # {servername: {summary: server_summary, etc.}}
         self.active_servers: Dict[str, Dict[str, int | Any]] = {} # {servername: {port, container, status, counter}}
@@ -219,22 +220,32 @@ class AIOrchestrator:
 
 # --- 2. The API Layer ---
 app = FastAPI()
-orchestrator = AIOrchestrator()  # Initialize once
+_orchestrator: Optional[AIOrchestrator] = None
+
+
+def get_orchestrator() -> AIOrchestrator:
+    """Lazy init so importing this module does not require a running Docker daemon."""
+    global _orchestrator
+    if _orchestrator is None:
+        _orchestrator = AIOrchestrator()
+    return _orchestrator
+
 
 @app.post("/orchestrate")
 async def handle_request(req: CommandRequest, response: Response) -> dict:
     print(f"Received request: {req}")
+    orch = get_orchestrator()
     if req.command == "list_available_servers":
-        result = await orchestrator.list_servers()
+        result = await orch.list_servers()
     
     elif req.command == "activate_server":
-        result = await orchestrator.activate_server(req.server_name, req.fetch_manual)
+        result = await orch.activate_server(req.server_name, req.fetch_manual)
     
     elif req.command == "stop_server":
-        result = await orchestrator.stop_server(req.server_name)
+        result = await orch.stop_server(req.server_name)
     
     elif req.command == "execute_server_code":
-        result = await orchestrator.execute(req.server_name, req.language, req.code)
+        result = await orch.execute(req.server_name, req.language, req.code)
     
     result["id"] = req.id
     return result

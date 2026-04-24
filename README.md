@@ -53,6 +53,69 @@ In a separate terminal window, start the interactive client to communicate with 
 * **Docker Image Builder (`src/cli_server/docker_image_builder.py`)**: A utility to automate the creation of tool-specific Docker images.
 * **Tool Servers**: Individual tools (like the weather server) are defined within `src/cli_server/` and run in isolated environments to ensure security.
 
+## Testing
+
+You do **not** need Docker or a running orchestrator to run the test suite: tests mock network/Docker where needed. Install dependencies (see [Setup and Installation](#setup-and-installation)), then from the **project root**:
+
+* **All tests** (unit + integration under `src/tests/`):
+
+    ```bash
+    uv run pytest
+    ```
+
+    or:
+
+    ```bash
+    python -m pytest
+    ```
+
+* **Only memory engine helpers** (pure validators, no FAISS/embed download):
+
+    ```bash
+    uv run pytest src/tests/test_memory_engine_validators.py
+    ```
+
+* **Memory `remember` / `recall` integration** (uses a fake `llm_side_request`; still loads `memory_engine` and runs fastembed + FAISS—first run may download the small embedding model):
+
+    ```bash
+    uv run pytest src/tests/test_memory_engine_integration.py
+    ```
+
+* **Verbose output and stop on first failure** (optional):
+
+    ```bash
+    uv run pytest -v -x
+    ```
+
+Running tests imports `src/cli_client` modules (e.g. `model.py`); the same API/SDK packages as `uv sync` are required. Memory integration tests do **not** call real model APIs; they **patch** the side-LLM helpers with deterministic JSON.
+
+**If `uv run pytest` shows nothing for a long time (looks frozen):** the process is often still **importing** large native extensions (`faiss`, `numpy`, first-time **fastembed** model work). Wait up to 1–2 minutes on a cold start, or run a tiny slice to confirm: `uv run pytest src/tests/test_memory_engine_validators.py -v --durations=0`. For unbuffered output: `PYTHONUNBUFFERED=1 uv run pytest -v ...`
+
+The project’s `pyproject.toml` sets **`[tool.pytest] testpaths = ["src/tests"]`** so pytest only discovers tests under that folder (avoids a slow, broad crawl of the whole repo).
+
+**Error: `Project virtual environment directory .../.venv cannot be used` (no Python executable):** the `.venv` folder is incomplete or corrupted. Fix it with a clean env, or stop using it (see below):
+
+* **Recreate `uv`’s default env (still uses `.venv`, but fixed):**
+
+    ```bash
+    rm -rf .venv
+    uv venv
+    uv sync
+    uv run pytest -v
+    ```
+
+* **Don’t use `.venv` — use Conda / another Python instead:** activate the environment you already use, install the project into it, then run pytest **without** `uv run`:
+
+    ```bash
+    # example: conda activate myenv
+    pip install -e .
+    python -m pytest -v
+    ```
+
+    That uses whatever `python` is on your `PATH`; no project `.venv` is required.
+
+* **Point `uv` at a different venv path** (advanced): set the `UV_PROJECT_ENVIRONMENT` environment variable to an existing virtualenv so `uv run` does not use `./.venv` (see Astral’s uv docs: *Project environments*).
+
 ## Project Roadmap
 
 * Rewrite the architecture in TypeScript for improved performance.

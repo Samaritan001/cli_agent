@@ -22,7 +22,7 @@ def test_tool_manual_manager():
     assert manager.inject_tool("unknown") is False
 
     # Test Info Retrieval
-    info = manager.get_tool_info("google")
+    info = manager.get_tool_info()
     assert "Does math" in info["tool_summaries"]
     assert "Math Manual Content" in info["tool_manuals"]
 

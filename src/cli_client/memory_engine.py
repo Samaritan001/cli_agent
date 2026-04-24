@@ -9,7 +9,10 @@ import glob
 import json
 import os
 
-from memory_config import MemoryNode, MemoryConfig
+try:
+    from memory_config import MemoryNode, MemoryConfig
+except ImportError:
+    from cli_client.memory_config import MemoryNode, MemoryConfig
 
 import logging
 
@@ -22,7 +25,10 @@ import numpy as np
 from fastembed import TextEmbedding
 
 # from memory_llm import MemoryLLMBackend, NullMemoryLLM, build_memory_llm_from_env
-from model import llm_side_request, llm_side_request_async, LanguageModelConfig
+try:
+    from model import llm_side_request, llm_side_request_async, LanguageModelConfig
+except ImportError:
+    from cli_client.model import llm_side_request, llm_side_request_async, LanguageModelConfig
 
 DEFAULT_SESSION_MEMORY_TEMPLATE = """
 # Session Title
@@ -413,7 +419,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
 
         # 1. Semantic Search (O(log n) with HNSW)
         if not self.nodes:
-            return []
+            return (self.latest_message_id, [])
 
         raw_q = list(self.embedding_model.embed([query]))
         query_embedding = np.asarray(raw_q, dtype=np.float32)
@@ -460,7 +466,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
             {"semantic": semantic_candidates, "entity": entity_candidates, "cause": cause_effect_candidates}
         )
         if not rrf_results:
-            return []
+            return (self.latest_message_id, [])
 
         # 5. Temporal recency: decay fused scores by age (hours since node timestamp).
         scored_candidates = self.temporal_boost(rrf_results)

@@ -8,9 +8,14 @@ import logging
 
 from typing import List, Dict, Any
 
-from managers import ToolManualManager
-from model import ClientLanguageModel, LanguageModelConfig
-from memory_engine import MemoryEngine, MemoryConfig
+try:
+    from managers import ToolManualManager
+    from model import ClientLanguageModel, LanguageModelConfig
+    from memory_engine import MemoryEngine, MemoryConfig
+except ImportError:
+    from cli_client.managers import ToolManualManager
+    from cli_client.model import ClientLanguageModel, LanguageModelConfig
+    from cli_client.memory_engine import MemoryEngine, MemoryConfig
 
 LOG_FORMAT = "\033[32m%(levelname)s\033[0m:    %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -49,8 +54,9 @@ class CLIClient:
         self.memory_engine = MemoryEngine(config=MemoryConfig(memory_dir=MEMORY_DIR), model_config=self.language_model.config)
         self.memory_buffer_start_id = 0
         self.history_window = 10  # Number of recent turns to keep in direct history context
-        
-        asyncio.run(self._list_available_servers())
+
+        if not self.test_flag:
+            asyncio.run(self._list_available_servers())
     
     async def _list_available_servers(self):
         async with httpx.AsyncClient() as client:
@@ -145,6 +151,7 @@ class CLIClient:
             calls.append(call)
             logger.info(f"Calling command '{call['command']}' with arguments {call}")
 
+        message_id = 0
         async with httpx.AsyncClient() as client:
             call_requests = [client.post(ORCHESTRATOR_URL, json=call) for call in calls]
             call_responses = await asyncio.gather(*call_requests)
@@ -155,7 +162,6 @@ class CLIClient:
             id = call_resp.get("id")
             command = command_records[id][0]
             server_name = command_records[id][1]
-            message_id = 0
             if call_resp["status"] != status.HTTP_200_OK:
                 error_status = call_resp["status"]
                 detail = call_resp["detail"]
@@ -170,7 +176,7 @@ class CLIClient:
                 if command == "list_available_servers":
                     self.tool_manager.register_summary(json.loads(call_resp["result"]))
                     result = "Tool summaries have been registered."
-                if command == "activate_server":
+                elif command == "activate_server":
                     if call_resp["result"]:
                         self.tool_manager.register_tool(server_name, call_resp["result"])
                     self.tool_manager.inject_tool(server_name)

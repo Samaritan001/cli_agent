@@ -15,19 +15,23 @@ def mock_httpx_post():
         yield mock_post
 
 @pytest.mark.asyncio
-@patch("cli_client.cli_client.LanguageModel")
+@patch("cli_client.cli_client.ClientLanguageModel")
 async def test_tool_callings(MockLanguageModel, mock_httpx_post):
-    client = CLIClient()
+    client = CLIClient(test_flag=True)
     # Mocking a tool call from the LLM
+    # Shape expected by tool_callings: top-level id + command, arguments for orchestrator body
     tool_calls = [
         {
             "id": "call_1",
-            "name": "math_server",
-            "arguments": {"command": "execute", "language": "python", "code": "print(1+1)"}
+            "command": "execute_server_code",
+            "arguments": {
+                "server_name": "math_server",
+                "language": "python",
+                "code": "print(1+1)",
+            },
         }
     ]
     
-    # The fix we discussed is applied in our mental model of the test
     await client.tool_callings(tool_calls)
     
     # Ensure network request was made
