@@ -9,26 +9,16 @@ import glob
 import json
 import os
 
-try:
-    from memory_config import MemoryNode, MemoryConfig
-except ImportError:
-    from cli_client.memory_config import MemoryNode, MemoryConfig
+from cli_client.memory_config import MemoryNode, MemoryConfig
+from cli_client.logging_config import get_logger
 
-import logging
-
-LOG_FORMAT = "\033[32m%(levelname)s\033[0m:    %(message)s"
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-logger = logging.getLogger("memory_engine")
+logger = get_logger("memory_engine")
 
 import faiss
 import numpy as np
 from fastembed import TextEmbedding
 
-# from memory_llm import MemoryLLMBackend, NullMemoryLLM, build_memory_llm_from_env
-try:
-    from model import llm_side_request, llm_side_request_async, LanguageModelConfig
-except ImportError:
-    from cli_client.model import llm_side_request, llm_side_request_async, LanguageModelConfig
+from cli_client.model import llm_side_request, llm_side_request_async, LanguageModelConfig
 
 DEFAULT_SESSION_MEMORY_TEMPLATE = """
 # Session Title
@@ -81,7 +71,7 @@ def _strip_json_fence(raw: str) -> str:
 class MemoryEngine:
     def __init__(self, config: Optional[MemoryConfig] = None, model_config: Optional[LanguageModelConfig] = None):
         # CORE STORAGE
-        self.nodes: Dict[int, MemoryNode] = {}
+        self._nodes: Dict[int, MemoryNode] = {}
         self.config = config or MemoryConfig()
         self.model_config = model_config or LanguageModelConfig()
         self._lock = asyncio.Lock()
@@ -91,16 +81,16 @@ class MemoryEngine:
         # 1. TEMPORAL LINKS: Sequential list of IDs
         # Stored as an ordered list where index reflects chronological arrival.
         # Provides O(1) adjacency lookups for time-based decay.
-        self.temporal_stream: List[int] = []
+        self._temporal_stream: List[int] = []
         
         # 2. ENTITY LINKS: Inverted Index (Hash Map)
         # Structure: { "Entity_Name": [node_id1, node_id2] }
         # Allows O(1) retrieval of all facts related to a specific person or object.
-        self.entity_index: Dict[str, List[int]] = {}
+        self._entity_index: Dict[str, List[int]] = {}
 
         # 3. SEMANTIC LINKS: FAISS Index (HNSW)
         self.embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        self.semantic_index = faiss.IndexIDMap(faiss.IndexHNSWFlat(self.config.faiss_dim, self.config.faiss_links_per_node)) # Support custom ID, (Dimension, links per node)
+        self._semantic_index = faiss.IndexIDMap(faiss.IndexHNSWFlat(self.config.faiss_dim, self.config.faiss_links_per_node)) # Support custom ID, (Dimension, links per node)
 
         # 4. CAUSE LINKS: Adjacency List (Directed Graph)
         # Structure: { "Cause_Node_ID": ["Effect_Node_ID_1", "Effect_Node_ID_2"] }
@@ -112,8 +102,14 @@ class MemoryEngine:
         # 2. Entity Search Parameters
         self.avg_dl = 0.0 # Average document length for BM25
         # 5. TODO: Implement temporal recalling by absolute timestamp matching, also consider time decay functions
-        # 7. TODO: Minimum score threshold for a node to be included in recall results
-        
+
+    def get_node(self, node_id: int) -> Optional[MemoryNode]:
+        """Return a memory node by id, or ``None`` if it does not exist."""
+        return self._nodes.get(node_id)
+
+    def has_node(self, node_id: int) -> bool:
+        """Return whether a memory node with the given id exists."""
+        return node_id in self._nodes
 
     @staticmethod
     def _safe_json_loads(raw_content: str) -> Optional[Dict]:
@@ -176,34 +172,26 @@ class MemoryEngine:
         ranked.sort(key=lambda x: x[0])
         return [memory_id for _, memory_id in ranked]
 
-    # TODO: better summarize triggering algorithm
-    def should_summarize_turn(self, user_input: str, assistant_output: str, had_tool_calls: bool, pending_turns: int) -> bool:
-        importance = 0.0
-        total_chars = len(user_input.strip()) + len(assistant_output.strip())
-        if total_chars >= self.config.summary_min_chars:
-            importance += 1.0
-        if had_tool_calls:
-            importance += 1.0
-        if "?" in user_input:
-            importance += 0.5
-        if pending_turns >= self.config.summary_force_after_turns:
-            return True
-        return importance >= self.config.summary_importance_threshold
-
-    # TODO: Original Claude Code summary prompt requires direct write to file ability.
+    # TODO: Original Claude Code summary prompt required direct write to file ability.
     # TODO: Convert files, images, and other formats to text
-    @staticmethod
-    def summarize_turn_buffer(history) -> str:
-        context = self._summary_system_prompt()
-        result = llm_side_request(context, config=self.model_config, history=history)
-        summary = self._safe_json_loads(result.get("content", ""))
-        if summary.stripe():
-            return summary
-        logger.warning("memory_llm summarize_turn schema validation failed: %s", result.get("content", ""))
+    def summarize_memory_buffer(self, history: List) -> str:
+        system_prompt = self._summary_system_prompt()
+        result = llm_side_request(
+            "Summarize the session based on the conversation history above.",
+            system_instruction=system_prompt,
+            config=self.model_config,
+            history=history,
+        )
+        content = result.get("content", "").strip()
+        if content:
+            return content
+        logger.warning("memory_llm summarize_turn produced empty content: %s", result.get("content", ""))
         return ""
 
-    @staticmethod
-    def _summary_system_prompt() -> str:
+    async def asummarize_memory_buffer(self, history: List) -> str:
+        return await asyncio.to_thread(self.summarize_memory_buffer, history)
+
+    def _summary_system_prompt(self) -> str:
         return f"""IMPORTANT: This message and these instructions are NOT part of the actual user conversation. Do NOT include any references to "note-taking", "session notes extraction", or these update instructions in the notes content.
 
 Based on the user conversation above (EXCLUDING this note-taking instruction message as well as system prompt, or any past session summaries), update the session memory.
@@ -213,7 +201,7 @@ The current content structure is:
 {DEFAULT_SESSION_MEMORY_TEMPLATE}
 </current_notes_content>
 
-Your ONLY task is to use the Edit tool to update the notes file, then stop. You can make multiple edits (update every section as needed) - make all Edit tool calls in parallel in a single message. Do not call any other tools.
+Your ONLY task is to return the updated session notes as markdown text. Do not call any tools.
 
 CRITICAL RULES FOR EDITING:
 - The file must maintain its exact structure with all sections, headers, and italic descriptions intact
@@ -237,7 +225,7 @@ Each section has TWO parts that must be preserved exactly as they appear in the 
 
 You ONLY update the actual content that comes AFTER these two preserved lines. The italic description lines starting and ending with underscores are part of the template structure, NOT content to be edited or removed.
 
-REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edits. Only include insights from the actual user conversation, never from these note-taking instructions. Do not delete or change section headers or italic _section descriptions_.
+REMEMBER: Return only the updated markdown notes. Only include insights from the actual user conversation, never from these note-taking instructions. Do not delete or change section headers or italic _section descriptions_.
 """
 
     def load_memory(self):
@@ -271,40 +259,40 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
             return
 
         # 2. Update CORE STORAGE
-        self.nodes = {node.id: node for node in loaded_nodes}
+        self._nodes = {node.id: node for node in loaded_nodes}
 
         # 3. Update TEMPORAL LINKS
         # Sort by timestamp to ensure chronological order in the stream
         loaded_nodes.sort(key=lambda x: x.timestamp)
-        self.temporal_stream = [node.id for node in loaded_nodes]
+        self._temporal_stream = [node.id for node in loaded_nodes]
 
         # 4. Update ENTITY LINKS (Inverted Index)
-        self.entity_index = {}
+        self._entity_index = {}
         total_doc_length = 0
         
         for node in loaded_nodes:
             total_doc_length += node.doc_length
             for entity_name in node.entities.keys():
-                if entity_name not in self.entity_index:
-                    self.entity_index[entity_name] = []
-                self.entity_index[entity_name].append(node.id)
+                if entity_name not in self._entity_index:
+                    self._entity_index[entity_name] = []
+                self._entity_index[entity_name].append(node.id)
 
         # 5. Update BM25 Parameters
         self.avg_dl = total_doc_length / len(loaded_nodes)
 
         # 6. Update SEMANTIC LINKS (FAISS Index)
         # We clear the index first to avoid duplicates if this is called multiple times
-        self.semantic_index = faiss.IndexIDMap(faiss.IndexHNSWFlat(self.config.faiss_dim, self.config.faiss_links_per_node))
+        self._semantic_index = faiss.IndexIDMap(faiss.IndexHNSWFlat(self.config.faiss_dim, self.config.faiss_links_per_node))
         
         embeddings = np.array([node.embedding for node in loaded_nodes]).astype('float32')
         ids = np.array([node.id for node in loaded_nodes]).astype('int64')
         
-        self.semantic_index.add_with_ids(embeddings, ids)
+        self._semantic_index.add_with_ids(embeddings, ids)
 
         if loaded_nodes:
             self.latest_message_id = max((node.message_id_range[1] for node in loaded_nodes), default=0)
 
-        logger.info(f"Successfully hydrated memory: {len(self.nodes)} nodes loaded and indexed.")
+        logger.info(f"Successfully hydrated memory: {len(self._nodes)} nodes loaded and indexed.")
 
     async def aload_memory(self):
         async with self._lock:
@@ -316,14 +304,14 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
             os.makedirs(self.config.memory_dir)
 
         cnt = 0
-        for id in self.temporal_stream[::-1]:
+        for id in self._temporal_stream[::-1]:
             # Define file path using the node id
             file_path = os.path.join(self.config.memory_dir, f"{id}.json")
             if os.path.exists(file_path):
                 break  # Stop if we encounter an existing file, assuming all previous nodes are already saved
 
             # Convert dataclass to dictionary
-            node_data = asdict(self.nodes[id])
+            node_data = asdict(self._nodes[id])
 
             # Handle non-serializable fields
             # 1. Convert datetime to ISO format string
@@ -362,21 +350,21 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
         else:
             embedding2D = embedding
 
-        self.semantic_index.add_with_ids(embedding2D, np.array([node_id], dtype=np.int64))
+        self._semantic_index.add_with_ids(embedding2D, np.array([node_id], dtype=np.int64))
 
         # Extract entities using LLM
         entities = self.extract_entities(context)
         for entity in entities:
-            self.entity_index.setdefault(entity, []).append(node_id)
+            self._entity_index.setdefault(entity, []).append(node_id)
         context_tokens = context.lower().split()
         entity_counts = {entity: context_tokens.count(entity.lower()) for entity in entities}
 
         # Identify causes using LLM
-        window_ids = self.temporal_stream[-self.config.cause_window :]
+        window_ids = self._temporal_stream[-self.config.cause_window :]
         causes = self.identify_causes(context, window_ids)
         for cause_id, level in causes.items():
-            if cause_id in self.nodes:
-                self.nodes[cause_id].effects[node_id] = level
+            if cause_id in self._nodes:
+                self._nodes[cause_id].effects[node_id] = level
         
         # Insert new memory node
         now = datetime.now(timezone.utc)
@@ -394,9 +382,9 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
         )
 
         # Store node and update Temporal Stream
-        self.nodes[node_id] = new_node
-        self.temporal_stream.append(node_id)
-        n = len(self.nodes)
+        self._nodes[node_id] = new_node
+        self._temporal_stream.append(node_id)
+        n = len(self._nodes)
         self.avg_dl = (self.avg_dl * (n - 1) + len(context_tokens)) / max(n, 1)
         self.latest_message_id = max(self.latest_message_id, message_id_range[1])
 
@@ -413,12 +401,12 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
         """
         def is_valid(nid: int) -> bool:
             if earliest_history_id == 0: return True
-            node = self.nodes.get(nid)
+            node = self._nodes.get(nid)
             # Exclude node if it overlaps with preserved history
             return node is not None and node.message_id_range[1] < earliest_history_id
 
         # 1. Semantic Search (O(log n) with HNSW)
-        if not self.nodes:
+        if not self._nodes:
             return (self.latest_message_id, [])
 
         raw_q = list(self.embedding_model.embed([query]))
@@ -426,7 +414,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
         if query_embedding.ndim == 1:
             query_embedding = query_embedding.reshape(1, -1)
 
-        distances, ids = self.semantic_index.search(query_embedding, self.config.semantic_K)
+        distances, ids = self._semantic_index.search(query_embedding, self.config.semantic_K)
         semantic_candidates = [int(i) for i in ids[0].tolist() if int(i) >= 0]
         semantic_candidates = list(dict.fromkeys(semantic_candidates))  # Deduplicate while preserving order
 
@@ -439,7 +427,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
         seed_ids: Set[int] = set(semantic_candidates) | set(entity_candidates)
         for cid in seed_ids:
             # update considers overlapping nodes
-            node = self.nodes.get(cid)
+            node = self._nodes.get(cid)
             if node is None:
                 continue
             for nbr_id, lvl in node.causes.items():
@@ -470,14 +458,35 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
 
         # 5. Temporal recency: decay fused scores by age (hours since node timestamp).
         scored_candidates = self.temporal_boost(rrf_results)
-        # 6. Neural reranking: reorder candidates (LLM backend; identity if using NullMemoryLLM).
-        ranked_candidates = self.neural_rerank(list(scored_candidates.keys()), query)
+        if not scored_candidates:
+            return (self.latest_message_id, [])
 
-        # 7. Final ordering: prepend recent stream, then fill remainder from reranked list (deduped later).
-        # TODO: Prune using score threshold
-        final_ids = ranked_candidates[:self.config.max_recall]
+        # 6. Minimum score threshold for a node to be included in recall results
+        max_score = max(scored_candidates.values())
+        if max_score > 0:
+            eligible_ids = {
+                nid
+                for nid, score in scored_candidates.items()
+                if (score / max_score) >= self.config.min_recall_score
+            }
+        else:
+            eligible_ids = set(scored_candidates.keys())
+
+        if not eligible_ids:
+            return (self.latest_message_id, [])
+
+        candidate_order = sorted(
+            eligible_ids,
+            key=lambda nid: scored_candidates[nid],
+            reverse=True,
+        )
+        # 7. Neural reranking: reorder candidates (LLM backend; identity if using NullMemoryLLM).
+        ranked_candidates = self.neural_rerank(candidate_order, query)
+
+        # 8. Final ordering after score threshold and reranking.
+        final_ids = [nid for nid in ranked_candidates if nid in eligible_ids][: self.config.max_recall]
         
-        # 8. Compute token budget
+        # 9. Compute token budget
         final_nodes = []
         token_count = 0
         examined_ids: Set[int] = set()
@@ -485,7 +494,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
             if nid in examined_ids:
                 continue
             examined_ids.add(nid)
-            node = self.nodes.get(nid)
+            node = self._nodes.get(nid)
             if node is None:
                 continue
             if token_count + node.doc_length > self.config.memory_token_limit:
@@ -510,11 +519,11 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
         # TODO: design a better consolidation algorithm or AI handling
         # TODO: prune out-dated or low-confidence memory nodes
         # Store this as a new 'observation' fact type node
-        # facts = [self.nodes[nid].text for nid in node_ids if nid in self.nodes]
+        # facts = [self._nodes[nid].text for nid in node_ids if nid in self._nodes]
         # summary = self.llm.reflect_synthesize(facts)
 
         # obs_id = self.remember(summary)
-        # self.nodes[obs_id].fact_type = "OBSERVATION"
+        # self._nodes[obs_id].fact_type = "OBSERVATION"
         # return summary
         pass
  
@@ -556,7 +565,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
 
     # Identify cause-effect relationships using LLM
     def identify_causes(self, current_memory: str, memory_window: List[int]) -> Dict[int, int]:
-        past_memories = [{"memory_id": self.nodes[id].id, "memory_content": self.nodes[id].text} for id in memory_window]
+        past_memories = [{"memory_id": self._nodes[id].id, "memory_content": self._nodes[id].text} for id in memory_window]
         memories = json.dumps(past_memories)
         context = f"Past Memories:\n{memories}\n\nCurrent Memory:\n{current_memory}"
         
@@ -572,7 +581,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
         return {}
 
     async def aidentify_causes(self, current_memory: str, memory_window: List[int]) -> Dict[int, int]:
-        past_memories = [{"memory_id": self.nodes[id].id, "memory_content": self.nodes[id].text} for id in memory_window]
+        past_memories = [{"memory_id": self._nodes[id].id, "memory_content": self._nodes[id].text} for id in memory_window]
         memories = json.dumps(past_memories)
         context = f"Past Memories:\n{memories}\n\nCurrent Memory:\n{current_memory}"
         system_prompt = self._causes_system_prompt(len(memory_window))
@@ -608,7 +617,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
         query_entities = self.extract_entities(query)
 
         scores: Dict[int, float] = defaultdict(float)
-        N = len(self.nodes)
+        N = len(self._nodes)
         if N == 0:
             return []
 
@@ -616,14 +625,14 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
 
         for entity in query_entities:
             # STEP 1: Calculate IDF for this token
-            n_q = len(self.entity_index.get(entity, []))
+            n_q = len(self._entity_index.get(entity, []))
             if n_q == 0:
                 continue
             idf = math.log((N - n_q + 0.5) / (n_q + 0.5) + 1.0)
             
             # STEP 2. Score each candidate containing this token
-            for node_id in self.entity_index[entity]:
-                node = self.nodes[node_id]
+            for node_id in self._entity_index[entity]:
+                node = self._nodes[node_id]
                 f_q = node.entities.get(entity, 0)
                 L_d = node.doc_length
                 numerator = f_q * (self.config.k1 + 1)
@@ -653,7 +662,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
         now = datetime.now(timezone.utc)
 
         for node_id, rrf_score in rrf_results.items():
-            node = self.nodes.get(node_id)
+            node = self._nodes.get(node_id)
             if node is None:
                 continue
             ts = node.timestamp
@@ -672,7 +681,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
     def neural_rerank(self, candidate_ids: List[int], query: str) -> List[int]:
         if not candidate_ids:
             return []
-        past_memories = [{"memory_id": self.nodes[id].id, "memory_content": self.nodes[id].text} for id in candidate_ids]
+        past_memories = [{"memory_id": self._nodes[id].id, "memory_content": self._nodes[id].text} for id in candidate_ids]
         memories = json.dumps(past_memories)
         context = f"Past Memories:\n{memories}\n\nUser Query:\n{query}"
         
@@ -690,7 +699,7 @@ REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edit
     async def aneural_rerank(self, candidate_ids: List[int], query: str) -> List[int]:
         if not candidate_ids:
             return []
-        past_memories = [{"memory_id": self.nodes[id].id, "memory_content": self.nodes[id].text} for id in candidate_ids]
+        past_memories = [{"memory_id": self._nodes[id].id, "memory_content": self._nodes[id].text} for id in candidate_ids]
         memories = json.dumps(past_memories)
         context = f"Past Memories:\n{memories}\n\nUser Query:\n{query}"
         system_prompt = self._rerank_system_prompt(len(candidate_ids))
@@ -732,5 +741,5 @@ if __name__ == "__main__":
     out = engine.recall("Tell me about the user's location")
     print(out)
     for nid in (id1, id2):
-        n = engine.nodes[nid]
+        n = engine.get_node(nid)
         print(f"{n.id}: {n.timestamp} : {n.text} ({n.fact_type})")

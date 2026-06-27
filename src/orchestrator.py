@@ -1,7 +1,8 @@
 import inspect
 from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel
-from typing import Optional, Dict, Set, Any
+from typing import Optional, Dict, Set, Any, Union
+from typing_extensions import TypedDict
 from collections import defaultdict
 
 import logging
@@ -21,6 +22,20 @@ from assets.request_headers import CommandRequest
 LOG_FORMAT = "\033[32m%(levelname)s\033[0m:    %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger("orchestrator")
+
+
+class OrchestratorSuccessResponse(TypedDict):
+    status: int
+    result: Optional[str]
+    info: str
+
+
+class OrchestratorErrorResponse(TypedDict):
+    status: int
+    detail: str
+
+
+OrchestratorResponse = Union[OrchestratorSuccessResponse, OrchestratorErrorResponse]
 
 # --- 1. The Encapsulated Logic ---
 class AIOrchestrator:
@@ -55,15 +70,15 @@ class AIOrchestrator:
         # asyncio.run(self.activate_server("weather"))
         # asyncio.run(self.stop_server("weather"))
 
-    async def list_servers(self) -> Dict[str, str]:
+    async def list_servers(self) -> OrchestratorSuccessResponse:
         summary = {name: info["summary"] for name, info in self.registry.items()}
         return {
             "status": status.HTTP_200_OK,
             "result": json.dumps(summary),
-            "info": "Fetched Tool Summaries"
+            "info": "Fetched Tool Summaries",
         }
 
-    async def activate_server(self, name: str, fetch_manual: bool) -> str:
+    async def activate_server(self, name: str, fetch_manual: bool) -> OrchestratorResponse:
         if name not in self.registry:
             return {"status": status.HTTP_404_NOT_FOUND, "detail": f"Server {name} not found in registry."}
         
@@ -150,7 +165,7 @@ class AIOrchestrator:
         return False
         
     
-    async def stop_server(self, name: str):
+    async def stop_server(self, name: str) -> OrchestratorResponse:
         if name not in self.registry:
             return {"status": status.HTTP_404_NOT_FOUND, "detail": f"Server {name} not found in registry."}
         
@@ -184,7 +199,7 @@ class AIOrchestrator:
                 return {"status": status.HTTP_404_NOT_FOUND, "detail": f"Server {name} already stopped or not active."}
         
 
-    async def execute(self, name: str, language: str, code: str):
+    async def execute(self, name: str, language: str, code: str) -> OrchestratorResponse:
         if name not in self.registry:
             return {"status": status.HTTP_404_NOT_FOUND, "detail": f"Server {name} not found in registry."}
         
@@ -232,23 +247,29 @@ def get_orchestrator() -> AIOrchestrator:
 
 
 @app.post("/orchestrate")
-async def handle_request(req: CommandRequest, response: Response) -> dict:
+async def handle_request(req: CommandRequest, response: Response) -> dict[str, Any]:
     print(f"Received request: {req}")
     orch = get_orchestrator()
     if req.command == "list_available_servers":
-        result = await orch.list_servers()
-    
+        result: OrchestratorResponse = await orch.list_servers()
+
     elif req.command == "activate_server":
         result = await orch.activate_server(req.server_name, req.fetch_manual)
-    
+
     elif req.command == "stop_server":
         result = await orch.stop_server(req.server_name)
-    
+
     elif req.command == "execute_server_code":
         result = await orch.execute(req.server_name, req.language, req.code)
-    
-    result["id"] = req.id
-    return result
+
+    else:
+        result = {
+            "status": status.HTTP_400_BAD_REQUEST,
+            "detail": f"Unknown command: {req.command}",
+        }
+
+    outbound: dict[str, Any] = {**result, "id": req.id}
+    return outbound
     
 
 if __name__ == "__main__":

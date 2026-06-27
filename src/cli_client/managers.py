@@ -1,10 +1,9 @@
 from typing import Dict, List, Set, Optional
 import json
 import logging
+from cli_client.logging_config import get_logger
 
-LOG_FORMAT = "\033[32m%(levelname)s\033[0m:    %(message)s"
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-logger = logging.getLogger("managers")
+logger = get_logger("managers")
 
 
 class ToolManualManager:
@@ -33,7 +32,7 @@ class ToolManualManager:
     def check_tool(self, name: str) -> bool:
         return name in self._registry
 
-    def inject_tool(self, name: str) -> bool:
+    def activate_tool(self, name: str) -> bool:
         """Fetch from registry and move into the active context."""
         if name in self._registry:
             self._active_tools.add(name)

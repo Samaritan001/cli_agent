@@ -1,26 +1,19 @@
 """
 Integration tests: remember + recall with a fake side LLM (no real API).
 
-Requires ``src/cli_client`` on path (flat ``memory_config`` / ``model`` imports).
 Uses fastembed + FAISS (may download model on first run).
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-import sys
 from typing import Any, Dict
 
 import pytest
 
-_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "cli_client"))
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
-
-import memory_config as mem_cfg  # noqa: E402
-import memory_engine as mem_eng  # noqa: E402
+import cli_client.memory_config as mem_cfg
+import cli_client.memory_engine as mem_eng
 
 _MARK = "XYZZYINTEG"
 
@@ -83,8 +76,8 @@ def test_remember_and_recall_roundtrip(engine: mem_eng.MemoryEngine):
     t2 = f"User and {_MARK} project shipped on Tuesday"
     n1 = engine.remember(t1, message_id_range=[0, 0])
     n2 = engine.remember(t2, message_id_range=[0, 0])
-    assert n1 in engine.nodes and n2 in engine.nodes
-    assert engine.nodes[n1].effects.get(n2) == 1
+    assert engine.has_node(n1) and engine.has_node(n2)
+    assert engine.get_node(n1).effects.get(n2) == 1
 
     q = f"tell me about {_MARK}"
     _latest, out = engine.recall(q, earliest_history_id=0)
@@ -97,6 +90,6 @@ def test_remember_and_recall_roundtrip(engine: mem_eng.MemoryEngine):
 async def test_aremember_arecall_async_flow(engine: mem_eng.MemoryEngine):
     t = f"async test {_MARK} note"
     n = await engine.aremember(t, [0, 0])
-    assert n in engine.nodes
+    assert engine.has_node(n)
     _latest, nodes = await engine.arecall(f"query {_MARK}")
     assert any(t in m.text for m in nodes)

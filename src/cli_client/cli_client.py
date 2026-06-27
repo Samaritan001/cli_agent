@@ -4,22 +4,14 @@ import asyncio
 from fastapi import FastAPI, HTTPException, Response, status
 
 import re
-import logging
+from typing import List, Dict, Any, Optional
 
-from typing import List, Dict, Any
+from cli_client.managers import ToolManualManager
+from cli_client.model import ClientLanguageModel, LanguageModelConfig
+from cli_client.memory_engine import MemoryEngine, MemoryConfig
+from cli_client.logging_config import configure_logging, get_logger
 
-try:
-    from managers import ToolManualManager
-    from model import ClientLanguageModel, LanguageModelConfig
-    from memory_engine import MemoryEngine, MemoryConfig
-except ImportError:
-    from cli_client.managers import ToolManualManager
-    from cli_client.model import ClientLanguageModel, LanguageModelConfig
-    from cli_client.memory_engine import MemoryEngine, MemoryConfig
-
-LOG_FORMAT = "\033[32m%(levelname)s\033[0m:    %(message)s"
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-logger = logging.getLogger("cli_client")
+logger = get_logger("cli_client")
 
 ORCHESTRATOR_URL = "http://127.0.0.1:8000/orchestrate"
 MEMORY_DIR = "./memory_docs"
@@ -54,10 +46,12 @@ class CLIClient:
         self.memory_engine = MemoryEngine(config=MemoryConfig(memory_dir=MEMORY_DIR), model_config=self.language_model.config)
         self.memory_buffer_start_id = 0
         self.history_window = 10  # Number of recent turns to keep in direct history context
+        
+        # Triggering Parameters for summarization
+        self.summary_force_after_turns = 10
+        self.summary_min_chars = 500
+        self.summary_importance_threshold = 1.5
 
-        if not self.test_flag:
-            asyncio.run(self._list_available_servers())
-    
     async def _list_available_servers(self):
         async with httpx.AsyncClient() as client:
             response = await client.post(ORCHESTRATOR_URL, json={"id": "auto-listing", "command": "list_available_servers"})
@@ -67,8 +61,12 @@ class CLIClient:
             else:
                 logger.error(f"Error listing servers: {response.status_code} - {response.text}")
 
-    async def agent_loop(self):                
+    async def agent_loop(self, *, list_servers: Optional[bool] = None):
+        if list_servers is None:
+            list_servers = not self.test_flag
         try:
+            if list_servers:
+                await self._list_available_servers()
             await self.memory_engine.aload_memory()
             while True:
                 user_input = await asyncio.to_thread(
@@ -84,14 +82,14 @@ class CLIClient:
                 earliest_message_id = max(0, message_id - self.history_window)
                 latest_stored_message_id, recalled_nodes = await self.memory_engine.arecall(
                     query=user_input,
-                    earliest_message_id=earliest_message_id
+                    earliest_history_id=earliest_message_id,
                 )
                 temp_history_window = message_id - min(earliest_message_id, latest_stored_message_id+1)
                 llm_output = self.language_model.parse_response(
                     await self.language_model.agenerate_response(
-                        self.tool_manager.get_tool_info(),
+                        tool_info=self.tool_manager.get_tool_info(),
                         memory_nodes=recalled_nodes,
-                        history_window=temp_history_window
+                        history_window=temp_history_window,
                     )
                 )
                 if self.test_flag:
@@ -102,13 +100,13 @@ class CLIClient:
                 tool_calls = llm_output.get("tool_calls", [])
                 had_tool_calls = len(tool_calls) > 0
                 while len(tool_calls) > 0:
-                    await self.tool_callings(tool_calls)
+                    await self.tool_calling(tool_calls)
                     temp_history_window = message_id - min(earliest_message_id, latest_stored_message_id+1)
                     llm_output = self.language_model.parse_response(
                         await self.language_model.agenerate_response(
-                            self.tool_manager.get_tool_info(),
+                            tool_info=self.tool_manager.get_tool_info(),
                             memory_nodes=recalled_nodes,
-                            history_window=temp_history_window
+                            history_window=temp_history_window,
                         )
                     )
                     if self.test_flag:
@@ -122,7 +120,7 @@ class CLIClient:
                 # TODO: better summarization triggering algorithm
                 if self.memory_buffer_start_id == 0:
                     self.memory_buffer_start_id = message_id
-                if self.memory_engine.should_summarize_turn(
+                if self.should_summarize(
                     user_input=user_input,
                     assistant_output=content,
                     had_tool_calls=had_tool_calls,
@@ -132,7 +130,7 @@ class CLIClient:
         finally:
             await self.memory_engine.asave_memory()
 
-    async def tool_callings(self, tool_calls: List[Dict[str, Any]]):
+    async def tool_calling(self, tool_calls: List[Dict[str, Any]]):
         logger.info(f"Processing {len(tool_calls)} tool calls...")
         command_records = {}
         calls = []
@@ -179,7 +177,7 @@ class CLIClient:
                 elif command == "activate_server":
                     if call_resp["result"]:
                         self.tool_manager.register_tool(server_name, call_resp["result"])
-                    self.tool_manager.inject_tool(server_name)
+                    self.tool_manager.activate_tool(server_name)
                     result = f"Tool '{server_name}' has been activated."
                 elif command == "stop_server":
                     self.tool_manager.prune_tool(server_name)
@@ -200,23 +198,36 @@ class CLIClient:
         
         return message_id
     
-    # Function: summarize context into memory content
-    async def summarize_memory(self, max_memory_tokens: int = 512):
-        self.language_model.add_user_message(self._summary_system_prompt(max_memory_tokens))
-        response = await self.language_model.agenerate_response(
-            self.tool_manager.get_tool_info(),
-            memory_nodes=[],
-            max_tokens=max_memory_tokens,
-        )
-        return self.language_model.parse_response(response)
+    # TODO: better summarize triggering algorithm
+    def should_summarize(self, user_input: str, assistant_output: str, had_tool_calls: bool, pending_turns: int) -> bool:
+        importance = 0.0
+        total_chars = len(user_input.strip()) + len(assistant_output.strip())
+        if total_chars >= self.summary_min_chars:
+            importance += 1.0
+        if had_tool_calls:
+            importance += 1.0
+        if "?" in user_input:
+            importance += 0.5
+        if pending_turns >= self.summary_force_after_turns:
+            return True
+        return importance >= self.summary_importance_threshold
 
-    async def _flush_memory_buffer(self, end_message_id: int):
+    async def _flush_memory_buffer(self, end_message_id: Optional[int] = None):
         if self.memory_buffer_start_id == 0:
             return
+        if end_message_id is None:
+            end_message_id = self.language_model.get_latest_message_id()
+        if end_message_id is None:
+            return
         history_window = end_message_id - self.memory_buffer_start_id + 1
-        summary = self.memory_engine.summarize_memory_buffer(self.language_model.get_history(window=history_window))
+        summary = await self.memory_engine.asummarize_memory_buffer(
+            self.language_model.get_history(window=history_window)
+        )
         if summary.strip():
-            await self.memory_engine.aremember(context=summary, message_id_range=[self.memory_buffer_start_id, end_message_id])
+            await self.memory_engine.aremember(
+                context=summary,
+                message_id_range=[self.memory_buffer_start_id, end_message_id],
+            )
         self.memory_buffer_start_id = 0
 
 
@@ -262,6 +273,7 @@ def generate_stop_command(server_name):
 
 # Example usage
 if __name__ == "__main__":
+    configure_logging()
     cli_client = CLIClient(model_type="openai", test_flag=True)
     asyncio.run(cli_client.agent_loop())
 
